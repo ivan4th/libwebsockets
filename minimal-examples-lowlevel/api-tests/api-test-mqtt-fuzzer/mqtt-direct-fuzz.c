@@ -182,6 +182,12 @@ create_fuzz_wsi(void)
 	wsi->a.protocol = &fuzz_protocols[0];
 	wsi->role_ops = &role_ops_mqtt;  /* May not be exported */
 
+	/*
+	 * Set client role flag - required for SUBACK/UNSUBACK parsing
+	 * LWSIFR_CLIENT is defined in private-lib-roles.h
+	 */
+	wsi->wsistate |= LWSIFR_CLIENT;
+
 	/* Initialize parser state */
 	wsi->mqtt->client.par.state = LMQCPP_IDLE;
 	wsi->mqtt->client.estate = LGSMQTT_IDLE;
