@@ -350,6 +350,32 @@ rops_handle_POLLOUT_mqtt(struct lws *wsi)
 	if (!wsi->mqtt)
 		return LWS_HP_RET_BAIL_DIE;
 
+	/*
+	 * PUBACK/PUBREC are network-level responses to receiving QoS1/QoS2
+	 * PUBLISH. They must be sent regardless of child POLLOUT state since
+	 * they operate at the protocol level, not the application level.
+	 */
+	if (lwsi_state(wsi) == LRS_ESTABLISHED &&
+	    !wsi->mqtt->inside_payload &&
+	    wsi->mqtt->send_puback) {
+		uint8_t buf[LWS_PRE + 4];
+		lwsl_notice("%s: issuing PUBACK for pkt id: %d\n",
+			    __func__, wsi->mqtt->peer_ack_pkt_id);
+
+		/* Fixed header */
+		buf[LWS_PRE] = LMQCP_PUBACK << 4;
+		/* Remaining len = 2 */
+		buf[LWS_PRE + 1] = 2;
+		/* Packet ID */
+		lws_ser_wu16be(&buf[LWS_PRE + 2], wsi->mqtt->peer_ack_pkt_id);
+
+		if (lws_write(wsi, (uint8_t *)&buf[LWS_PRE], 4,
+			      LWS_WRITE_BINARY) != 4)
+			return LWS_HP_RET_BAIL_DIE;
+
+		wsi->mqtt->send_puback = 0;
+	}
+
 	lws_wsi_mux_dump_waiting_children(wsi);
 
 	do {
@@ -382,31 +408,6 @@ rops_handle_POLLOUT_mqtt(struct lws *wsi)
 
 		lwsl_debug("%s: child %s (wsistate 0x%x)\n", __func__,
 			   lws_wsi_tag(w), (unsigned int)w->wsistate);
-
-		if (lwsi_state(wsi) == LRS_ESTABLISHED &&
-		    !wsi->mqtt->inside_payload &&
-		    wsi->mqtt->send_puback) {
-			uint8_t buf[LWS_PRE + 4];
-			lwsl_notice("%s: issuing PUBACK for pkt id: %d\n",
-				    __func__, wsi->mqtt->ack_pkt_id);
-
-			/* Fixed header */
-			buf[LWS_PRE] = LMQCP_PUBACK << 4;
-			/* Remaining len = 2 */
-			buf[LWS_PRE + 1] = 2;
-			/* Packet ID */
-			lws_ser_wu16be(&buf[LWS_PRE + 2], wsi->mqtt->peer_ack_pkt_id);
-
-			if (lws_write(wsi, (uint8_t *)&buf[LWS_PRE], 4,
-				      LWS_WRITE_BINARY) != 4)
-				return LWS_HP_RET_BAIL_DIE;
-
-			wsi->mqtt->send_puback = 0;
-			w->mux.requested_POLLOUT = 1;
-
-			wa = &wsi->mux.child_list;
-			goto next_child;
-		}
 
 		if (lws_callback_as_writeable(w)) {
 			lwsl_notice("%s: Closing child %s\n", __func__, lws_wsi_tag(w));

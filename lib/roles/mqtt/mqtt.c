@@ -711,6 +711,7 @@ _lws_mqtt_rx_parser(struct lws *wsi, lws_mqtt_parser_t *par,
 					   __func__, (int)par->cpkt_remlen);
 				if (par->cpkt_remlen < 2)
 					goto send_protocol_error_and_close;
+				par->fixed = 0; /* init for pkt_id read */
 				par->state = LMQCPP_PUBREC_VH_PKT_ID;
 				break;
 			default:
@@ -720,15 +721,16 @@ _lws_mqtt_rx_parser(struct lws *wsi, lws_mqtt_parser_t *par,
 			break;
 
 		case LMQCPP_PUBREC_VH_PKT_ID:
-			if (len < 2) {
-				lwsl_notice("%s: len breakage 3\n", __func__);
-				return -1;
+			/* Read packet ID with single-byte fragmentation support */
+			while (len && par->fixed < 2) {
+				par->fixed_seen[par->fixed++] = *buf++;
+				len--;
 			}
+			if (par->fixed < 2)
+				break; /* need more data */
 
-			par->cpkt_id = lws_ser_ru16be(buf);
+			par->cpkt_id = lws_ser_ru16be(par->fixed_seen);
 			wsi->mqtt->ack_pkt_id = par->cpkt_id;
-			buf += 2;
-			len -= 2;
 			par->cpkt_remlen -= 2;
 			par->n = 0;
 
@@ -747,6 +749,7 @@ _lws_mqtt_rx_parser(struct lws *wsi, lws_mqtt_parser_t *par,
 					   __func__, (int)par->cpkt_remlen);
 				if (par->cpkt_remlen < 2)
 					goto send_protocol_error_and_close;
+				par->fixed = 0; /* init for pkt_id read */
 				par->state = LMQCPP_PUBREL_VH_PKT_ID;
 				break;
 			default:
@@ -756,15 +759,16 @@ _lws_mqtt_rx_parser(struct lws *wsi, lws_mqtt_parser_t *par,
 			break;
 
 		case LMQCPP_PUBREL_VH_PKT_ID:
-			if (len < 2) {
-				lwsl_notice("%s: len breakage 3\n", __func__);
-				return -1;
+			/* Read packet ID with single-byte fragmentation support */
+			while (len && par->fixed < 2) {
+				par->fixed_seen[par->fixed++] = *buf++;
+				len--;
 			}
+			if (par->fixed < 2)
+				break; /* need more data */
 
-			par->cpkt_id = lws_ser_ru16be(buf);
+			par->cpkt_id = lws_ser_ru16be(par->fixed_seen);
 			wsi->mqtt->ack_pkt_id = par->cpkt_id;
-			buf += 2;
-			len -= 2;
 			par->cpkt_remlen -= 2;
 			par->n = 0;
 
@@ -783,6 +787,7 @@ _lws_mqtt_rx_parser(struct lws *wsi, lws_mqtt_parser_t *par,
 					   __func__, (int)par->cpkt_remlen);
 				if (par->cpkt_remlen < 2)
 					goto send_protocol_error_and_close;
+				par->fixed = 0; /* init for pkt_id read */
 				par->state = LMQCPP_PUBCOMP_VH_PKT_ID;
 				break;
 			default:
@@ -792,15 +797,16 @@ _lws_mqtt_rx_parser(struct lws *wsi, lws_mqtt_parser_t *par,
 			break;
 
 		case LMQCPP_PUBCOMP_VH_PKT_ID:
-			if (len < 2) {
-				lwsl_notice("%s: len breakage 3\n", __func__);
-				return -1;
+			/* Read packet ID with single-byte fragmentation support */
+			while (len && par->fixed < 2) {
+				par->fixed_seen[par->fixed++] = *buf++;
+				len--;
 			}
+			if (par->fixed < 2)
+				break; /* need more data */
 
-			par->cpkt_id = lws_ser_ru16be(buf);
+			par->cpkt_id = lws_ser_ru16be(par->fixed_seen);
 			wsi->mqtt->ack_pkt_id = par->cpkt_id;
-			buf += 2;
-			len -= 2;
 			par->cpkt_remlen -= 2;
 			par->n = 0;
 
@@ -834,24 +840,28 @@ _lws_mqtt_rx_parser(struct lws *wsi, lws_mqtt_parser_t *par,
 			break;
 
 		case LMQCPP_PUBLISH_VH_TOPIC:
-		{
-			lws_mqtt_publish_param_t *pub = NULL;
-			unsigned int overhead;
+			/*
+			 * Initialize for reading topic length (2 bytes)
+			 * using fixed_seen[] buffer for fragmentation safety
+			 */
+			par->fixed = 0;
+			par->state = LMQCPP_PUBLISH_VH_TOPIC_LEN;
+			/* fallthrough */
 
-			if (len < 2) {
-				lwsl_notice("%s: topic too short\n", __func__);
-				return -1;
+		case LMQCPP_PUBLISH_VH_TOPIC_LEN:
+			/*
+			 * Read topic length 2 bytes, handling single-byte
+			 * fragmentation by buffering in fixed_seen[]
+			 */
+			while (len && par->fixed < 2) {
+				par->fixed_seen[par->fixed++] = *buf++;
+				len--;
 			}
+			if (par->fixed < 2)
+				break; /* need more data */
 
-			/* Topic len */
-			par->n = lws_ser_ru16be(buf);
-			buf += 2;
-			len -= 2;
-
-			if (len < par->n) {/* the way this is written... */
-				lwsl_notice("%s: len breakage\n", __func__);
-				return -1;
-			}
+			/* Got both bytes - combine into topic length */
+			par->n = lws_ser_ru16be(par->fixed_seen);
 
 			/* Invalid topic len */
 			if (par->n == 0) {
@@ -861,24 +871,56 @@ _lws_mqtt_rx_parser(struct lws *wsi, lws_mqtt_parser_t *par,
 			}
 			lwsl_debug("%s: PUBLISH topic len %d\n",
 				   __func__, (int)par->n);
+
+			/* Allocate publish param and topic buffer */
 			assert(!wsi->mqtt->rx_cpkt_param);
 			wsi->mqtt->rx_cpkt_param = lws_zalloc(
 				sizeof(lws_mqtt_publish_param_t), "rx pub param");
 			if (!wsi->mqtt->rx_cpkt_param)
 				goto oom;
-			pub = (lws_mqtt_publish_param_t *)wsi->mqtt->rx_cpkt_param;
 
-			pub->topic_len = (uint16_t)par->n;
+			{
+				lws_mqtt_publish_param_t *pub =
+					(lws_mqtt_publish_param_t *)wsi->mqtt->rx_cpkt_param;
+				pub->topic_len = (uint16_t)par->n;
+				pub->topic = (char *)lws_zalloc((size_t)pub->topic_len + 1,
+								"rx publish topic");
+				if (!pub->topic)
+					goto oom;
+			}
 
-			/* Topic Name */
-			pub->topic = (char *)lws_zalloc((size_t)pub->topic_len + 1,
-							"rx publish topic");
-			if (!pub->topic)
-				goto oom;
-			lws_strncpy(pub->topic, (const char *)buf,
-				    (size_t)pub->topic_len + 1);
-			buf += pub->topic_len;
-			len -= pub->topic_len;
+			/* Reset consumed counter for topic string */
+			par->consumed = 0;
+			par->state = LMQCPP_PUBLISH_VH_TOPIC_STR;
+			/* fallthrough */
+
+		case LMQCPP_PUBLISH_VH_TOPIC_STR:
+		{
+			lws_mqtt_publish_param_t *pub =
+				(lws_mqtt_publish_param_t *)wsi->mqtt->rx_cpkt_param;
+			unsigned int overhead;
+			size_t chunk;
+
+			if (!pub || !pub->topic) {
+				lwsl_err("%s: topic str state without pub\n", __func__);
+				goto send_protocol_error_and_close;
+			}
+
+			/* Copy available bytes into topic buffer */
+			chunk = (size_t)(par->n - par->consumed);
+			if (chunk > len)
+				chunk = len;
+
+			memcpy(pub->topic + par->consumed, buf, chunk);
+			par->consumed += (uint32_t)chunk;
+			buf += chunk;
+			len -= chunk;
+
+			if (par->consumed < par->n)
+				break; /* need more data for topic */
+
+			/* Topic complete - null terminate */
+			pub->topic[pub->topic_len] = '\0';
 
 			/* Extract QoS Level from Fixed Header Flags */
 			pub->qos = (lws_mqtt_qos_levels_t)
@@ -904,6 +946,7 @@ _lws_mqtt_rx_parser(struct lws *wsi, lws_mqtt_parser_t *par,
 				break;
 			case QOS1:
 			case QOS2:
+				par->fixed = 0; /* reset for pkt_id read */
 				par->state = LMQCPP_PUBLISH_VH_PKT_ID;
 				break;
 			default:
@@ -920,14 +963,18 @@ _lws_mqtt_rx_parser(struct lws *wsi, lws_mqtt_parser_t *par,
 				(lws_mqtt_publish_param_t *)wsi->mqtt->rx_cpkt_param;
 			unsigned int overhead;
 
-			if (len < 2) {
-				lwsl_notice("%s: len breakage 2\n", __func__);
-				return -1;
+			/*
+			 * Read packet ID 2 bytes, handling single-byte
+			 * fragmentation by buffering in fixed_seen[]
+			 */
+			while (len && par->fixed < 2) {
+				par->fixed_seen[par->fixed++] = *buf++;
+				len--;
 			}
+			if (par->fixed < 2)
+				break; /* need more data */
 
-			par->cpkt_id = lws_ser_ru16be(buf);
-			buf += 2;
-			len -= 2;
+			par->cpkt_id = lws_ser_ru16be(par->fixed_seen);
 			wsi->mqtt->peer_ack_pkt_id = par->cpkt_id;
 			wsi->mqtt->qos2_duplicate = 0;
 
@@ -1112,6 +1159,7 @@ _lws_mqtt_rx_parser(struct lws *wsi, lws_mqtt_parser_t *par,
 					   __func__, (int)par->cpkt_remlen);
 				if (par->cpkt_remlen <= 2)
 					goto send_protocol_error_and_close;
+				par->fixed = 0; /* init for pkt_id read */
 				par->state = LMQCPP_SUBACK_VH_PKT_ID;
 				break;
 			default:
@@ -1121,16 +1169,19 @@ _lws_mqtt_rx_parser(struct lws *wsi, lws_mqtt_parser_t *par,
 			break;
 
 		case LMQCPP_SUBACK_VH_PKT_ID:
-
-			if (len < 2) {
-				lwsl_notice("%s: len breakage 4\n", __func__);
-				return -1;
+			/*
+			 * Read packet ID 2 bytes, handling single-byte
+			 * fragmentation by buffering in fixed_seen[]
+			 */
+			while (len && par->fixed < 2) {
+				par->fixed_seen[par->fixed++] = *buf++;
+				len--;
 			}
+			if (par->fixed < 2)
+				break; /* need more data */
 
-			par->cpkt_id = lws_ser_ru16be(buf);
+			par->cpkt_id = lws_ser_ru16be(par->fixed_seen);
 			wsi->mqtt->ack_pkt_id = par->cpkt_id;
-			buf += 2;
-			len -= 2;
 			par->cpkt_remlen -= 2;
 			par->n = 0;
 			par->state = LMQCPP_SUBACK_PAYLOAD;
@@ -1182,6 +1233,7 @@ _lws_mqtt_rx_parser(struct lws *wsi, lws_mqtt_parser_t *par,
 					   __func__, (int)par->cpkt_remlen);
 				if (par->cpkt_remlen < 2)
 					goto send_protocol_error_and_close;
+				par->fixed = 0; /* init for pkt_id read */
 				par->state = LMQCPP_UNSUBACK_VH_PKT_ID;
 				break;
 			default:
@@ -1191,16 +1243,16 @@ _lws_mqtt_rx_parser(struct lws *wsi, lws_mqtt_parser_t *par,
 			break;
 
 		case LMQCPP_UNSUBACK_VH_PKT_ID:
-
-			if (len < 2) {
-				lwsl_notice("%s: len breakage 3\n", __func__);
-				return -1;
+			/* Read packet ID with single-byte fragmentation support */
+			while (len && par->fixed < 2) {
+				par->fixed_seen[par->fixed++] = *buf++;
+				len--;
 			}
+			if (par->fixed < 2)
+				break; /* need more data */
 
-			par->cpkt_id = lws_ser_ru16be(buf);
+			par->cpkt_id = lws_ser_ru16be(par->fixed_seen);
 			wsi->mqtt->ack_pkt_id = par->cpkt_id;
-			buf += 2;
-			len -= 2;
 			par->cpkt_remlen -= 2;
 			par->n = 0;
 
@@ -1237,16 +1289,16 @@ _lws_mqtt_rx_parser(struct lws *wsi, lws_mqtt_parser_t *par,
 		case LMQCPP_PUBACK_VH_PKT_ID:
 			/*
 			 * There are 3 fixed bytes and then a VBI for the
-			 * property section length
+			 * property section length. Read byte by byte to
+			 * handle fragmentation correctly.
 			 */
-			par->fixed_seen[par->fixed++] = *buf++;
-			if (len < par->cpkt_remlen - par->n) {
-				lwsl_notice("%s: len breakage 4\n", __func__);
-				return -1;
+			while (len && par->fixed < 3 &&
+			       par->n < par->cpkt_remlen) {
+				par->fixed_seen[par->fixed++] = *buf++;
+				len--;
+				par->n++;
 			}
-			len--;
-			par->n++;
-			if (par->fixed == 2)
+			if (par->fixed >= 2)
 				par->cpkt_id = lws_ser_ru16be(par->fixed_seen);
 
 			if (par->fixed == 3) {
