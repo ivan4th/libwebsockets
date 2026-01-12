@@ -270,13 +270,16 @@ int main(int argc, char **argv)
 	lws_context_destroy(g_ctx);
 
 	/*
-	 * Return 0 if all tests passed (bugs found as expected).
-	 * Return 1 if there were test errors.
-	 * Return 2 if no bugs were found (unexpected - bugs should exist).
+	 * Return 0 if all tests passed (no infinite loops - bugs fixed).
+	 * Return 1 if there were test errors or bugs found.
 	 */
 	if (errors > 0)
 		return 1;
-	if (bugs_found == 0)
-		return 2;  /* Unexpected: bugs should exist */
-	return 0;  /* Expected: bugs confirmed */
+	if (bugs_found > 0) {
+		printf("\nTEST FAILED: %d infinite loop bug(s) found!\n", bugs_found);
+		return 1;
+	}
+
+	printf("\nTEST PASSED: All packet types handled correctly.\n");
+	return 0;
 }
