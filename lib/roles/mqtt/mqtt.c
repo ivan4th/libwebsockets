@@ -1049,7 +1049,11 @@ _lws_mqtt_rx_parser(struct lws *wsi, lws_mqtt_parser_t *par,
 				par->cpkt_remlen = par->vbit.value;
 				lwsl_debug("%s: CONNACK pkt len = %d\n",
 					   __func__, (int)par->cpkt_remlen);
-				if (par->cpkt_remlen != 2)
+				/*
+				 * MQTT 5.0 CONNACK: minimum 2 bytes (flags + reason),
+				 * but can be larger when properties are present.
+				 */
+				if (par->cpkt_remlen < 2)
 					goto send_protocol_error_and_close;
 
 				par->state = LMQCPP_CONNACK_VH_FLAGS;
@@ -1115,6 +1119,16 @@ _lws_mqtt_rx_parser(struct lws *wsi, lws_mqtt_parser_t *par,
 			 */
 			switch (par->conn_rc) {
 			case 0:
+				/*
+				 * MQTT 5.0: if cpkt_remlen > 2, there are
+				 * properties to skip before cmd_completion
+				 */
+				if (par->cpkt_remlen > 2) {
+					lws_mqtt_vbi_init(&par->vbit);
+					par->props_consumed = 0;
+					par->state = LMQCPP_CONNACK_PROPERTIES_LEN_VBI;
+					break;
+				}
 				goto cmd_completion;
 			/* 3.1.1 errors [MQTT-3.2.3] */
 			case 1:
@@ -1137,6 +1151,38 @@ _lws_mqtt_rx_parser(struct lws *wsi, lws_mqtt_parser_t *par,
 				par->reason = (lws_mqtt_reason_t)par->conn_rc;
 				lwsl_notice("%s: bad connack retcode\n", __func__);
 				goto send_reason_and_close;
+			}
+			break;
+
+		case LMQCPP_CONNACK_PROPERTIES_LEN_VBI:
+			/*
+			 * MQTT 5.0: Read the properties length VBI and then
+			 * skip over the properties bytes
+			 */
+			switch (lws_mqtt_vbi_r(&par->vbit, &buf, &len)) {
+			case LMSPR_NEED_MORE:
+				break;
+			case LMSPR_COMPLETED:
+				par->props_len = par->vbit.value;
+				lwsl_debug("%s: CONNACK props len = %d\n",
+					   __func__, (int)par->props_len);
+				/*
+				 * If there are no properties, this is a
+				 * command completion event in itself
+				 */
+				if (!par->props_len)
+					goto cmd_completion;
+
+				/*
+				 * Otherwise consume the properties before
+				 * completing the command
+				 */
+				par->state = LMQCPP_EAT_PROPERTIES_AND_COMPLETE;
+				break;
+			default:
+				lwsl_notice("%s: connack props bad vbi\n",
+					    __func__);
+				goto send_protocol_error_and_close;
 			}
 			break;
 
