@@ -56,6 +56,12 @@ enum fuzz_mode {
 	FUZZ_CHUNKED      = 3   /* Feed in random chunks */
 };
 
+/* Sub-mode for CONNACK testing (bits 2-3 of mode_byte when mode=0 or mode=1) */
+enum fuzz_connack_submode {
+	CONNACK_SUBMODE_DISABLED   = 0,  /* Not in CONNACK wait mode */
+	CONNACK_SUBMODE_SENT_CONNECT = 1 /* Simulate client waiting for CONNACK */
+};
+
 /* Sub-modes for FUZZ_SINGLE_BYTE and FUZZ_CHUNKED (bits 4-5 of mode_byte) */
 enum fuzz_submode {
 	SUBMODE_BASIC      = 0,  /* Basic mode with ESTABLISHED state */
@@ -160,7 +166,7 @@ feed_parser(struct lws *wsi, lws_mqtt_parser_t *par,
  * Uses lws internals - this is fragile but necessary for direct fuzzing.
  */
 static struct lws *
-create_fuzz_wsi(void)
+create_fuzz_wsi(int connack_mode)
 {
 	struct lws *wsi;
 
@@ -180,17 +186,26 @@ create_fuzz_wsi(void)
 	wsi->a.context = G.ctx;
 	wsi->a.vhost = G.vhost;
 	wsi->a.protocol = &fuzz_protocols[0];
-	wsi->role_ops = &role_ops_mqtt;  /* May not be exported */
 
 	/*
-	 * Set client role flag - required for SUBACK/UNSUBACK parsing
-	 * LWSIFR_CLIENT is defined in private-lib-roles.h
+	 * Use lws_role_transition() to properly set the client role.
+	 * This ensures struct layout consistency between fuzzer and library.
+	 * Using LWSIFR_CLIENT as the role flag and LRS_UNCONNECTED as state.
 	 */
-	wsi->wsistate |= LWSIFR_CLIENT;
+	lws_role_transition(wsi, LWSIFR_CLIENT, LRS_UNCONNECTED, &role_ops_mqtt);
 
 	/* Initialize parser state */
 	wsi->mqtt->client.par.state = LMQCPP_IDLE;
-	wsi->mqtt->client.estate = LGSMQTT_IDLE;
+
+	/*
+	 * Set estate based on mode:
+	 * - connack_mode=1: LGSMQTT_SENT_CONNECT (waiting for CONNACK)
+	 * - connack_mode=0: LGSMQTT_IDLE (normal mode)
+	 */
+	if (connack_mode)
+		wsi->mqtt->client.estate = LGSMQTT_SENT_CONNECT;
+	else
+		wsi->mqtt->client.estate = LGSMQTT_IDLE;
 
 	return wsi;
 }
@@ -209,6 +224,14 @@ destroy_fuzz_wsi(struct lws *wsi)
 					lws_free(pub->topic);
 				lws_free(wsi->mqtt->rx_cpkt_param);
 			}
+			/*
+			 * The mqtt structure may have been reallocated by the
+			 * parser during CONNACK processing (mqtt.c:1422).
+			 * If mqtt is NOT pointing to the embedded space (wsi+1),
+			 * it was separately allocated and needs to be freed.
+			 */
+			if (wsi->mqtt != (struct _lws_mqtt_related *)(wsi + 1))
+				lws_free(wsi->mqtt);
 		}
 		lws_free(wsi);
 	}
@@ -245,7 +268,9 @@ setup_wsi_submode(struct lws *wsi, enum fuzz_submode submode)
  * Input format:
  *   Byte 0: Mode + flags
  *     bits 6-7: fuzz mode (0-3)
- *     bits 0-5: chunk hint for FUZZ_CHUNKED mode
+ *     bit 2:    CONNACK submode (1=client waiting for CONNACK, for mode 0/1)
+ *     bits 4-5: sub-mode for SINGLE_BYTE/CHUNKED modes
+ *     bits 0-3: chunk hint for FUZZ_CHUNKED mode
  *   Bytes 1+: MQTT packet data to parse
  */
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
@@ -254,6 +279,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 	lws_mqtt_parser_t *par;
 	enum fuzz_mode mode;
 	enum fuzz_submode submode;
+	int connack_mode;
 	uint8_t mode_byte, chunk_hint;
 
 	if (size < 2)
@@ -266,6 +292,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 	mode_byte = data[0];
 	mode = (enum fuzz_mode)(mode_byte >> 6);
 	submode = (enum fuzz_submode)((mode_byte >> 4) & 0x03);
+	connack_mode = (mode_byte >> 2) & 0x01;  /* Bit 2: CONNACK submode */
 	chunk_hint = mode_byte & 0x0f;  /* Lower 4 bits for chunk hint */
 	data++;
 	size--;
@@ -277,8 +304,12 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 	if (size > 4096)
 		size = 4096;
 
-	/* Create a minimal wsi for the parser */
-	wsi = create_fuzz_wsi();
+	/*
+	 * Create a minimal wsi for the parser.
+	 * For modes 0/1: connack_mode determines if we're waiting for CONNACK.
+	 * For modes 2/3: connack_mode is ignored (submode controls estate).
+	 */
+	wsi = create_fuzz_wsi((mode <= FUZZ_ESTABLISHED) ? connack_mode : 0);
 	if (!wsi)
 		return 0;
 
@@ -286,14 +317,19 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 
 	switch (mode) {
 	case FUZZ_IDLE:
-		/* Parser starts in IDLE, waiting for first packet byte */
+		/*
+		 * Parser starts in IDLE, waiting for first packet byte.
+		 * If connack_mode is set, estate is LGSMQTT_SENT_CONNECT
+		 * which allows proper CONNACK parsing.
+		 */
 		par->state = LMQCPP_IDLE;
 		feed_parser(wsi, par, data, size, 0, 0);
 		break;
 
 	case FUZZ_ESTABLISHED:
 		/*
-		 * Simulate established state - set estate and parse
+		 * Simulate established state - set estate and parse.
+		 * connack_mode is ignored since we're already established.
 		 */
 		wsi->mqtt->client.estate = LGSMQTT_ESTABLISHED;
 		par->state = LMQCPP_IDLE;
@@ -329,9 +365,9 @@ int main(void)
 	FILE *f;
 	mkdir("corpus", 0755);
 
-	/* Mode 0: IDLE - CONNACK */
+	/* Mode 0: IDLE - CONNACK (with CONNACK submode bit 2 set) */
 	{
-		uint8_t d[] = {0x00, 0x20, 0x02, 0x00, 0x00};
+		uint8_t d[] = {0x04, 0x20, 0x02, 0x00, 0x00};
 		f = fopen("corpus/idle_connack.bin", "wb");
 		if (f) { fwrite(d, 1, sizeof(d), f); fclose(f); }
 	}
@@ -529,7 +565,7 @@ int main(void)
 	/* CONNACK with Session Expiry (0x11) and Receive Maximum (0x21) */
 	{
 		uint8_t d[] = {
-			0x00,  /* Mode: FUZZ_IDLE */
+			0x04,  /* Mode: FUZZ_IDLE + CONNACK submode (bit 2) */
 			0x20,  /* CONNACK */
 			0x0B,  /* Remaining length: 11 */
 			0x00,  /* Session present: 0 */
@@ -545,7 +581,7 @@ int main(void)
 	/* CONNACK with multiple properties */
 	{
 		uint8_t d[] = {
-			0x00,  /* Mode: FUZZ_IDLE */
+			0x04,  /* Mode: FUZZ_IDLE + CONNACK submode (bit 2) */
 			0x20,  /* CONNACK */
 			0x14,  /* Remaining length: 20 */
 			0x00,  /* Session present: 0 */
@@ -690,7 +726,7 @@ int main(void)
 	/* CONNACK with Server Keep Alive override */
 	{
 		uint8_t d[] = {
-			0x00,  /* Mode: FUZZ_IDLE */
+			0x04,  /* Mode: FUZZ_IDLE + CONNACK submode (bit 2) */
 			0x20,  /* CONNACK */
 			0x07,  /* Remaining length: 7 */
 			0x00,  /* Session present: 0 */
@@ -705,7 +741,7 @@ int main(void)
 	/* CONNACK with Assigned Client Identifier */
 	{
 		uint8_t d[] = {
-			0x00,  /* Mode: FUZZ_IDLE */
+			0x04,  /* Mode: FUZZ_IDLE + CONNACK submode (bit 2) */
 			0x20,  /* CONNACK */
 			0x10,  /* Remaining length: 16 */
 			0x00,  /* Session present: 0 */
@@ -732,6 +768,397 @@ int main(void)
 			'p', 'a', 'y', 'l', 'o', 'a', 'd'
 		};
 		f = fopen("corpus/publish_qos1_multi_props.bin", "wb");
+		if (f) { fwrite(d, 1, sizeof(d), f); fclose(f); }
+	}
+
+	/*
+	 * === Edge Cases - VBI Parsing ===
+	 * VBI (Variable Byte Integer) encoding:
+	 *   1 byte:  0-127
+	 *   2 bytes: 128-16383
+	 *   3 bytes: 16384-2097151
+	 *   4 bytes: 2097152-268435455
+	 */
+
+	/* PUBLISH with 2-byte VBI remaining length (128 = 0x80 0x01) */
+	{
+		/* We need payload to make remaining length >= 128 */
+		uint8_t d[140];
+		int i;
+		d[0] = 0x40;  /* Mode: FUZZ_ESTABLISHED */
+		d[1] = 0x30;  /* PUBLISH QoS 0 */
+		d[2] = 0x83;  /* Remaining length byte 1: 0x83 = 131 & 0x7F | 0x80 */
+		d[3] = 0x01;  /* Remaining length byte 2: upper bits */
+		d[4] = 0x00; d[5] = 0x04;  /* Topic length: 4 */
+		d[6] = 't'; d[7] = 'e'; d[8] = 's'; d[9] = 't';  /* Topic */
+		d[10] = 0x00;  /* Properties length: 0 */
+		for (i = 11; i < 140; i++) d[i] = 'x';  /* Fill payload */
+		f = fopen("corpus/publish_2byte_vbi.bin", "wb");
+		if (f) { fwrite(d, 1, sizeof(d), f); fclose(f); }
+	}
+
+	/* PUBLISH with short topic (1 char) */
+	{
+		uint8_t d[] = {0x40, 0x30, 0x06, 0x00, 0x01, 't', 0x00, 'h', 'i'};
+		f = fopen("corpus/publish_short_topic.bin", "wb");
+		if (f) { fwrite(d, 1, sizeof(d), f); fclose(f); }
+	}
+
+	/* PUBLISH with empty payload */
+	{
+		uint8_t d[] = {0x40, 0x30, 0x07, 0x00, 0x04, 't', 'e', 's', 't', 0x00};
+		f = fopen("corpus/publish_empty_payload.bin", "wb");
+		if (f) { fwrite(d, 1, sizeof(d), f); fclose(f); }
+	}
+
+	/* PUBLISH with DUP flag set (0x38 = PUBLISH + DUP) */
+	{
+		uint8_t d[] = {0x40, 0x38, 0x08, 0x00, 0x04, 't', 'e', 's', 't', 'h', 'i'};
+		f = fopen("corpus/publish_dup.bin", "wb");
+		if (f) { fwrite(d, 1, sizeof(d), f); fclose(f); }
+	}
+
+	/* PUBLISH with RETAIN flag (0x31 = PUBLISH + RETAIN) */
+	{
+		uint8_t d[] = {0x40, 0x31, 0x08, 0x00, 0x04, 't', 'e', 's', 't', 'h', 'i'};
+		f = fopen("corpus/publish_retain.bin", "wb");
+		if (f) { fwrite(d, 1, sizeof(d), f); fclose(f); }
+	}
+
+	/* PUBLISH QoS 2 with DUP flag (0x3C = PUBLISH + QoS2 + DUP) */
+	{
+		uint8_t d[] = {
+			0x40, 0x3C, 0x0B, 0x00, 0x04, 't', 'e', 's', 't',
+			0x00, 0x01, 'h', 'i'
+		};
+		f = fopen("corpus/publish_qos2_dup.bin", "wb");
+		if (f) { fwrite(d, 1, sizeof(d), f); fclose(f); }
+	}
+
+	/*
+	 * === QoS2 Flow Variations with Reason Codes ===
+	 */
+
+	/* PUBREC with reason code 0x10 (No matching subscribers) */
+	{
+		uint8_t d[] = {0x40, 0x50, 0x04, 0x00, 0x01, 0x10, 0x00};
+		f = fopen("corpus/pubrec_no_match.bin", "wb");
+		if (f) { fwrite(d, 1, sizeof(d), f); fclose(f); }
+	}
+
+	/* PUBREC with reason code 0x80 (Unspecified error) */
+	{
+		uint8_t d[] = {0x40, 0x50, 0x04, 0x00, 0x01, 0x80, 0x00};
+		f = fopen("corpus/pubrec_error.bin", "wb");
+		if (f) { fwrite(d, 1, sizeof(d), f); fclose(f); }
+	}
+
+	/* PUBREL with reason code 0x92 (Packet ID not found) */
+	{
+		uint8_t d[] = {0x40, 0x62, 0x04, 0x00, 0x01, 0x92, 0x00};
+		f = fopen("corpus/pubrel_notfound.bin", "wb");
+		if (f) { fwrite(d, 1, sizeof(d), f); fclose(f); }
+	}
+
+	/* PUBCOMP with reason code 0x92 (Packet ID not found) */
+	{
+		uint8_t d[] = {0x40, 0x70, 0x04, 0x00, 0x01, 0x92, 0x00};
+		f = fopen("corpus/pubcomp_notfound.bin", "wb");
+		if (f) { fwrite(d, 1, sizeof(d), f); fclose(f); }
+	}
+
+	/* Complete QoS 2 flow: PUBREC then PUBCOMP (simulated) */
+	{
+		uint8_t d[] = {
+			0x40,  /* Mode: FUZZ_ESTABLISHED */
+			0x50, 0x02, 0x00, 0x01,  /* PUBREC packet ID 1 */
+			0x70, 0x02, 0x00, 0x01   /* PUBCOMP packet ID 1 */
+		};
+		f = fopen("corpus/qos2_flow_complete.bin", "wb");
+		if (f) { fwrite(d, 1, sizeof(d), f); fclose(f); }
+	}
+
+	/*
+	 * === MQTT 5.0 Property Edge Cases ===
+	 */
+
+	/* CONNACK with Wildcard Subscription Available */
+	{
+		uint8_t d[] = {
+			0x04, 0x20, 0x05, 0x00, 0x00,
+			0x02,  /* Properties length: 2 */
+			0x28, 0x01  /* Wildcard Sub Available: true */
+		};
+		f = fopen("corpus/connack_wildcard.bin", "wb");
+		if (f) { fwrite(d, 1, sizeof(d), f); fclose(f); }
+	}
+
+	/* CONNACK with Shared Subscription Available */
+	{
+		uint8_t d[] = {
+			0x04, 0x20, 0x05, 0x00, 0x00,
+			0x02,  /* Properties length: 2 */
+			0x2A, 0x01  /* Shared Sub Available: true */
+		};
+		f = fopen("corpus/connack_shared_sub.bin", "wb");
+		if (f) { fwrite(d, 1, sizeof(d), f); fclose(f); }
+	}
+
+	/* CONNACK with error reason code */
+	{
+		uint8_t d[] = {
+			0x04, 0x20, 0x03, 0x00,
+			0x87,  /* Reason: Not authorized */
+			0x00   /* No properties */
+		};
+		f = fopen("corpus/connack_notauth.bin", "wb");
+		if (f) { fwrite(d, 1, sizeof(d), f); fclose(f); }
+	}
+
+	/* CONNACK with Session Present flag set */
+	{
+		uint8_t d[] = {
+			0x04, 0x20, 0x03, 0x01,  /* Session Present: 1 */
+			0x00,  /* Reason: Success */
+			0x00   /* No properties */
+		};
+		f = fopen("corpus/connack_session_present.bin", "wb");
+		if (f) { fwrite(d, 1, sizeof(d), f); fclose(f); }
+	}
+
+	/* PUBLISH with Subscription Identifier (VBI property) */
+	{
+		uint8_t d[] = {
+			0x40, 0x30, 0x0C, 0x00, 0x04, 't', 'e', 's', 't',
+			0x02,  /* Properties length: 2 */
+			0x0B, 0x05,  /* Subscription ID: 5 */
+			'h', 'i'
+		};
+		f = fopen("corpus/publish_sub_id.bin", "wb");
+		if (f) { fwrite(d, 1, sizeof(d), f); fclose(f); }
+	}
+
+	/* PUBLISH with Correlation Data */
+	{
+		uint8_t d[] = {
+			0x40, 0x30, 0x13, 0x00, 0x04, 't', 'e', 's', 't',
+			0x08,  /* Properties length: 8 */
+			0x09,  /* Correlation Data property */
+			0x00, 0x04, 0x01, 0x02, 0x03, 0x04,  /* Binary data */
+			'h', 'i'
+		};
+		f = fopen("corpus/publish_correlation.bin", "wb");
+		if (f) { fwrite(d, 1, sizeof(d), f); fclose(f); }
+	}
+
+	/*
+	 * === SUBACK/UNSUBACK Variations ===
+	 */
+
+	/* SUBACK with all failure codes */
+	{
+		uint8_t d[] = {
+			0x40, 0x90, 0x07, 0x00, 0x01,
+			0x00,  /* Properties length: 0 */
+			0x80, 0x83, 0x87, 0x91  /* Various failure codes */
+		};
+		f = fopen("corpus/suback_failures.bin", "wb");
+		if (f) { fwrite(d, 1, sizeof(d), f); fclose(f); }
+	}
+
+	/* SUBACK with mixed success/failure */
+	{
+		uint8_t d[] = {
+			0x40, 0x90, 0x06, 0x00, 0x01,
+			0x00,  /* Properties length: 0 */
+			0x00, 0x80, 0x01  /* QoS0, fail, QoS1 */
+		};
+		f = fopen("corpus/suback_mixed.bin", "wb");
+		if (f) { fwrite(d, 1, sizeof(d), f); fclose(f); }
+	}
+
+	/* UNSUBACK with multiple results */
+	{
+		uint8_t d[] = {
+			0x40, 0xB0, 0x05, 0x00, 0x01,
+			0x00,  /* Properties length: 0 */
+			0x00, 0x11  /* Success, no subscription existed */
+		};
+		f = fopen("corpus/unsuback_multi.bin", "wb");
+		if (f) { fwrite(d, 1, sizeof(d), f); fclose(f); }
+	}
+
+	/*
+	 * === Large Packet ID Values ===
+	 */
+
+	/* PUBACK with large packet ID */
+	{
+		uint8_t d[] = {0x40, 0x40, 0x02, 0xFF, 0xFF};  /* Packet ID 65535 */
+		f = fopen("corpus/puback_large_id.bin", "wb");
+		if (f) { fwrite(d, 1, sizeof(d), f); fclose(f); }
+	}
+
+	/* PUBLISH QoS 1 with large packet ID */
+	{
+		uint8_t d[] = {
+			0x40, 0x32, 0x0B, 0x00, 0x04, 't', 'e', 's', 't',
+			0xFF, 0xFF,  /* Packet ID 65535 */
+			'h', 'i'
+		};
+		f = fopen("corpus/publish_large_id.bin", "wb");
+		if (f) { fwrite(d, 1, sizeof(d), f); fclose(f); }
+	}
+
+	/*
+	 * === Multi-byte topic names ===
+	 */
+
+	/* PUBLISH with longer topic */
+	{
+		uint8_t d[] = {
+			0x40, 0x30, 0x1A,
+			0x00, 0x10, 's', 'e', 'n', 's', 'o', 'r', '/', 't', 'e', 'm', 'p',
+			'/', 'd', 'a', 't', 'a',
+			0x00,  /* Properties length */
+			't', 'e', 's', 't'
+		};
+		f = fopen("corpus/publish_long_topic.bin", "wb");
+		if (f) { fwrite(d, 1, sizeof(d), f); fclose(f); }
+	}
+
+	/* PUBLISH with nested topic structure */
+	{
+		uint8_t d[] = {
+			0x40, 0x30, 0x1C,
+			0x00, 0x12, 'h', 'o', 'm', 'e', '/', 'l', 'i', 'v', 'i', 'n', 'g',
+			'/', 'l', 'a', 'm', 'p', '/', '1',
+			0x00, 'o', 'n'
+		};
+		f = fopen("corpus/publish_nested_topic.bin", "wb");
+		if (f) { fwrite(d, 1, sizeof(d), f); fclose(f); }
+	}
+
+	/*
+	 * === Chunked Mode Edge Cases ===
+	 */
+
+	/* Chunked mode with tiny chunks (size 1) */
+	{
+		uint8_t d[] = {
+			0xC1,  /* Mode: FUZZ_CHUNKED, chunk size 1+1=2 */
+			0x30, 0x08, 0x00, 0x04, 't', 'e', 's', 't', 'h', 'i'
+		};
+		f = fopen("corpus/chunked_tiny.bin", "wb");
+		if (f) { fwrite(d, 1, sizeof(d), f); fclose(f); }
+	}
+
+	/* Chunked mode with large chunks */
+	{
+		uint8_t d[] = {
+			0xCF,  /* Mode: FUZZ_CHUNKED, chunk size 15+1=16 */
+			0x30, 0x08, 0x00, 0x04, 't', 'e', 's', 't', 'h', 'i'
+		};
+		f = fopen("corpus/chunked_large.bin", "wb");
+		if (f) { fwrite(d, 1, sizeof(d), f); fclose(f); }
+	}
+
+	/*
+	 * === PINGREQ, DISCONNECT, AUTH Corpus ===
+	 * These packet types were previously unhandled and are now supported.
+	 */
+
+	/* PINGREQ - valid packet (remaining length = 0) */
+	{
+		uint8_t d[] = {0x40, 0xC0, 0x00};
+		f = fopen("corpus/pingreq_valid.bin", "wb");
+		if (f) { fwrite(d, 1, sizeof(d), f); fclose(f); }
+	}
+
+	/* PINGREQ - invalid (non-zero remaining length) */
+	{
+		uint8_t d[] = {0x40, 0xC0, 0x01, 0x00};
+		f = fopen("corpus/pingreq_invalid.bin", "wb");
+		if (f) { fwrite(d, 1, sizeof(d), f); fclose(f); }
+	}
+
+	/* DISCONNECT - MQTT 3.1.1 style (no reason code) */
+	{
+		uint8_t d[] = {0x40, 0xE0, 0x00};
+		f = fopen("corpus/disconnect_simple.bin", "wb");
+		if (f) { fwrite(d, 1, sizeof(d), f); fclose(f); }
+	}
+
+	/* DISCONNECT - MQTT 5.0 with reason code only */
+	{
+		uint8_t d[] = {0x40, 0xE0, 0x01, 0x00};  /* Reason: Normal disconnection */
+		f = fopen("corpus/disconnect_reason.bin", "wb");
+		if (f) { fwrite(d, 1, sizeof(d), f); fclose(f); }
+	}
+
+	/* DISCONNECT - MQTT 5.0 with reason code 0x04 (Disconnect with Will Message) */
+	{
+		uint8_t d[] = {0x40, 0xE0, 0x02, 0x04, 0x00};  /* Reason + empty props */
+		f = fopen("corpus/disconnect_will.bin", "wb");
+		if (f) { fwrite(d, 1, sizeof(d), f); fclose(f); }
+	}
+
+	/* DISCONNECT - MQTT 5.0 with Reason String property */
+	{
+		uint8_t d[] = {
+			0x40, 0xE0, 0x0C,  /* Remaining length: 12 */
+			0x00,  /* Reason: Normal disconnection */
+			0x09,  /* Properties length: 9 */
+			0x1F, 0x00, 0x06, 'c', 'l', 'o', 's', 'e', 'd'  /* Reason string */
+		};
+		f = fopen("corpus/disconnect_reason_string.bin", "wb");
+		if (f) { fwrite(d, 1, sizeof(d), f); fclose(f); }
+	}
+
+	/* AUTH - MQTT 5.0 Success (0x00) */
+	{
+		uint8_t d[] = {0x40, 0xF0, 0x02, 0x00, 0x00};
+		f = fopen("corpus/auth_success.bin", "wb");
+		if (f) { fwrite(d, 1, sizeof(d), f); fclose(f); }
+	}
+
+	/* AUTH - MQTT 5.0 Continue Authentication (0x18) */
+	{
+		uint8_t d[] = {0x40, 0xF0, 0x02, 0x18, 0x00};
+		f = fopen("corpus/auth_continue.bin", "wb");
+		if (f) { fwrite(d, 1, sizeof(d), f); fclose(f); }
+	}
+
+	/* AUTH - MQTT 5.0 Re-authenticate (0x19) */
+	{
+		uint8_t d[] = {0x40, 0xF0, 0x02, 0x19, 0x00};
+		f = fopen("corpus/auth_reauth.bin", "wb");
+		if (f) { fwrite(d, 1, sizeof(d), f); fclose(f); }
+	}
+
+	/* AUTH - with Authentication Method property */
+	{
+		uint8_t d[] = {
+			0x40, 0xF0, 0x0D,  /* Remaining length: 13 */
+			0x00,  /* Reason: Success */
+			0x0A,  /* Properties length: 10 */
+			0x15, 0x00, 0x07, 'S', 'C', 'R', 'A', 'M', '-', '1'  /* Auth Method */
+		};
+		f = fopen("corpus/auth_method.bin", "wb");
+		if (f) { fwrite(d, 1, sizeof(d), f); fclose(f); }
+	}
+
+	/* AUTH - single-byte fragmentation mode */
+	{
+		uint8_t d[] = {0x80, 0xF0, 0x02, 0x18, 0x00};
+		f = fopen("corpus/auth_fragmented.bin", "wb");
+		if (f) { fwrite(d, 1, sizeof(d), f); fclose(f); }
+	}
+
+	/* DISCONNECT - single-byte fragmentation mode */
+	{
+		uint8_t d[] = {0x80, 0xE0, 0x02, 0x04, 0x00};
+		f = fopen("corpus/disconnect_fragmented.bin", "wb");
 		if (f) { fwrite(d, 1, sizeof(d), f); fclose(f); }
 	}
 
