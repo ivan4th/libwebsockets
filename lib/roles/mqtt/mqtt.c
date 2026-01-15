@@ -681,6 +681,148 @@ _lws_mqtt_rx_parser(struct lws *wsi, lws_mqtt_parser_t *par,
 				goto send_protocol_error_and_close;
 			goto cmd_completion;
 
+		/*
+		 * PINGREQ (0xC0) - client sends to server, server should
+		 * respond with PINGRESP. Remaining length must be 0.
+		 */
+		case LMQCPP_PINGREQ_PACKET:
+			len--;
+			/* remaining length must be zero */
+			if (*buf++)
+				goto send_protocol_error_and_close;
+			goto cmd_completion;
+
+		/*
+		 * DISCONNECT (0xE0) - graceful connection termination
+		 * MQTT 3.1.1: remaining length = 0
+		 * MQTT 5.0: optional reason code + properties
+		 */
+		case LMQCPP_DISCONNECT_PACKET:
+			lwsl_debug("%s: received DISCONNECT pkt\n", __func__);
+			lws_mqtt_vbi_init(&par->vbit);
+			par->state = LMQCPP_DISCONNECT_REMAINING_LEN_VBI;
+			break;
+
+		case LMQCPP_DISCONNECT_REMAINING_LEN_VBI:
+			switch (lws_mqtt_vbi_r(&par->vbit, &buf, &len)) {
+			case LMSPR_NEED_MORE:
+				break;
+			case LMSPR_COMPLETED:
+				par->cpkt_remlen = par->vbit.value;
+				lwsl_debug("%s: DISCONNECT pkt len = %d\n",
+					   __func__, (int)par->cpkt_remlen);
+				if (par->cpkt_remlen == 0) {
+					/* MQTT 3.1.1 style - no reason code */
+					par->reason = LMQCP_REASON_NORMAL_DISCONNECTION;
+					goto cmd_completion;
+				}
+				par->state = LMQCPP_DISCONNECT_REASON_CODE;
+				break;
+			default:
+				lwsl_notice("%s: disconnect bad vbi\n", __func__);
+				goto send_protocol_error_and_close;
+			}
+			break;
+
+		case LMQCPP_DISCONNECT_REASON_CODE:
+			if (!len)
+				break;
+			par->reason = *buf++;
+			len--;
+			par->cpkt_remlen--;
+			lwsl_debug("%s: DISCONNECT reason = 0x%02x\n",
+				   __func__, par->reason);
+			if (par->cpkt_remlen == 0)
+				goto cmd_completion;
+			/* Properties follow */
+			lws_mqtt_vbi_init(&par->vbit);
+			par->state = LMQCPP_DISCONNECT_PROPERTIES_LEN_VBI;
+			break;
+
+		case LMQCPP_DISCONNECT_PROPERTIES_LEN_VBI:
+			switch (lws_mqtt_vbi_r(&par->vbit, &buf, &len)) {
+			case LMSPR_NEED_MORE:
+				break;
+			case LMSPR_COMPLETED:
+				par->props_len = par->vbit.value;
+				par->consumed = 0;
+				lwsl_debug("%s: DISCONNECT props len = %d\n",
+					   __func__, (int)par->props_len);
+				if (par->props_len == 0)
+					goto cmd_completion;
+				/* Skip properties - just eat them */
+				par->state = LMQCPP_EAT_PROPERTIES_AND_COMPLETE;
+				break;
+			default:
+				lwsl_notice("%s: disconnect props bad vbi\n",
+					    __func__);
+				goto send_protocol_error_and_close;
+			}
+			break;
+
+		/*
+		 * AUTH (0xF0) - MQTT 5.0 authentication exchange
+		 * Structure: reason code (1 byte) + properties
+		 */
+		case LMQCPP_AUTH_PACKET:
+			lwsl_debug("%s: received AUTH pkt\n", __func__);
+			lws_mqtt_vbi_init(&par->vbit);
+			par->state = LMQCPP_AUTH_REMAINING_LEN_VBI;
+			break;
+
+		case LMQCPP_AUTH_REMAINING_LEN_VBI:
+			switch (lws_mqtt_vbi_r(&par->vbit, &buf, &len)) {
+			case LMSPR_NEED_MORE:
+				break;
+			case LMSPR_COMPLETED:
+				par->cpkt_remlen = par->vbit.value;
+				lwsl_debug("%s: AUTH pkt len = %d\n",
+					   __func__, (int)par->cpkt_remlen);
+				if (par->cpkt_remlen < 2) {
+					/* AUTH needs at least reason + props len */
+					goto send_protocol_error_and_close;
+				}
+				par->state = LMQCPP_AUTH_REASON_CODE;
+				break;
+			default:
+				lwsl_notice("%s: auth bad vbi\n", __func__);
+				goto send_protocol_error_and_close;
+			}
+			break;
+
+		case LMQCPP_AUTH_REASON_CODE:
+			if (!len)
+				break;
+			par->reason = *buf++;
+			len--;
+			par->cpkt_remlen--;
+			lwsl_debug("%s: AUTH reason = 0x%02x\n",
+				   __func__, par->reason);
+			/* Properties must follow */
+			lws_mqtt_vbi_init(&par->vbit);
+			par->state = LMQCPP_AUTH_PROPERTIES_LEN_VBI;
+			break;
+
+		case LMQCPP_AUTH_PROPERTIES_LEN_VBI:
+			switch (lws_mqtt_vbi_r(&par->vbit, &buf, &len)) {
+			case LMSPR_NEED_MORE:
+				break;
+			case LMSPR_COMPLETED:
+				par->props_len = par->vbit.value;
+				par->consumed = 0;
+				lwsl_debug("%s: AUTH props len = %d\n",
+					   __func__, (int)par->props_len);
+				if (par->props_len == 0)
+					goto cmd_completion;
+				/* Skip properties - just eat them */
+				par->state = LMQCPP_EAT_PROPERTIES_AND_COMPLETE;
+				break;
+			default:
+				lwsl_notice("%s: auth props bad vbi\n", __func__);
+				goto send_protocol_error_and_close;
+			}
+			break;
+
 		case LMQCPP_CONNECT_VH_PROPERTIES_VBI_LEN:
 			switch (lws_mqtt_vbi_r(&par->vbit, &buf, &len)) {
 			case LMSPR_NEED_MORE:
