@@ -104,13 +104,13 @@ if (requirements)
 		target_link_libraries(${CONNACK_TEST} websockets ${LIBWEBSOCKETS_DEP_LIBS})
 	endif()
 
-	# Unhandled packets test - tests for PINGREQ, DISCONNECT, AUTH parsing
-	set(UNHANDLED_TEST lws-api-test-mqtt-unhandled-packets)
-	add_executable(${UNHANDLED_TEST} test-unhandled-packets.c)
-	add_test(NAME api-test-mqtt-unhandled-packets COMMAND lws-api-test-mqtt-unhandled-packets)
-	set_tests_properties(api-test-mqtt-unhandled-packets PROPERTIES TIMEOUT 10)
+	# Control packets test - tests for PINGREQ, DISCONNECT, AUTH parsing
+	set(CONTROL_TEST lws-api-test-mqtt-control-packets)
+	add_executable(${CONTROL_TEST} test-control-packets.c)
+	add_test(NAME api-test-mqtt-control-packets COMMAND lws-api-test-mqtt-control-packets)
+	set_tests_properties(api-test-mqtt-control-packets PROPERTIES TIMEOUT 10)
 
-	target_include_directories(${UNHANDLED_TEST} PRIVATE
+	target_include_directories(${CONTROL_TEST} PRIVATE
 		${LWS_LIB_BUILD_INCLUDE_DIRS}
 		${CMAKE_SOURCE_DIR}/lib
 		${CMAKE_SOURCE_DIR}/lib/core
@@ -131,13 +131,13 @@ if (requirements)
 		${CMAKE_SOURCE_DIR}/lib/secure-streams
 		${CMAKE_BINARY_DIR}
 	)
-	target_compile_definitions(${UNHANDLED_TEST} PRIVATE LWS_BUILDING_STATIC)
+	target_compile_definitions(${CONTROL_TEST} PRIVATE LWS_BUILDING_STATIC)
 
 	if (websockets_shared)
-		target_link_libraries(${UNHANDLED_TEST} websockets_shared ${LIBWEBSOCKETS_DEP_LIBS})
-		add_dependencies(${UNHANDLED_TEST} websockets_shared)
+		target_link_libraries(${CONTROL_TEST} websockets_shared ${LIBWEBSOCKETS_DEP_LIBS})
+		add_dependencies(${CONTROL_TEST} websockets_shared)
 	else()
-		target_link_libraries(${UNHANDLED_TEST} websockets ${LIBWEBSOCKETS_DEP_LIBS})
+		target_link_libraries(${CONTROL_TEST} websockets ${LIBWEBSOCKETS_DEP_LIBS})
 	endif()
 
 endif()
