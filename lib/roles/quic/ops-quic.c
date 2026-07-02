@@ -49,24 +49,40 @@ lws_quic_pto_cb(lws_sorted_usec_list_t *sul)
 			return;
 		}
 
-		qn->pto_probe_needed = 1;
+		qn->pto_probe_needed = 2;
 #if (_LWS_ENABLED_LOGS & LLL_INFO)
 		LWS_RATELIMIT_DEFINE_STATIC(rl);
 		lwsl_ratelimit_info(&rl, 1000000, "QUIC PTO Timer Fired! Forcing POLLOUT for retransmission sweep\n");
 #endif
 		int sent_ping = 0;
-		/* Add a PING frame to force a packet out if we don't have pending tx */
-		for (int i = 0; i < LWS_QUIC_LEVEL_COUNT; i++) {
+		size_t total_bytes_lost = 0;
+		/* Aggressively retransmit Initial/Handshake frames (RFC 9002 6.2.4) */
+		for (int i = 0; i < LWS_QUIC_LEVEL_APP; i++) {
 			if (qn->in_flight[i].count) {
-				struct lws_quic_tx_frame *ping = lws_zalloc(sizeof(*ping), "pto ping");
-				if (ping) {
-					ping->type = LWS_QUIC_FT_PING;
-					lws_dll2_add_tail(&ping->list, &qn->pending_tx[i]);
-					lwsl_wsi_notice(qn->nwsi, "QUIC PTO: Enqueued PING for level %d", i);
-				}
+				lws_start_foreach_dll_safe(struct lws_dll2 *, d, d1, qn->in_flight[i].head) {
+					struct lws_quic_tx_frame *f = lws_container_of(d, struct lws_quic_tx_frame, list);
+					lws_dll2_remove(d);
+					total_bytes_lost += f->wire_len;
+					f->wire_len = 0; /* CRITICAL: Reset wire_len */
+					lws_dll2_add_tail(&f->list, &qn->pending_tx[i]);
+				} lws_end_foreach_dll_safe(d, d1);
+				lwsl_wsi_notice(qn->nwsi, "QUIC PTO: Retransmitting Initial/Handshake for level %d", i);
 				sent_ping = 1;
-				break;
 			}
+		}
+
+		if (total_bytes_lost && qn->cc_ops && qn->cc_ops->on_loss)
+			qn->cc_ops->on_loss(qn->nwsi, total_bytes_lost);
+
+		/* For App Data, just send a PING to elicit an ACK */
+		if (!sent_ping && qn->in_flight[LWS_QUIC_LEVEL_APP].count) {
+			struct lws_quic_tx_frame *ping = lws_zalloc(sizeof(*ping), "pto ping");
+			if (ping) {
+				ping->type = LWS_QUIC_FT_PING;
+				lws_dll2_add_tail(&ping->list, &qn->pending_tx[LWS_QUIC_LEVEL_APP]);
+				lwsl_wsi_notice(qn->nwsi, "QUIC PTO: Enqueued PING for level 3");
+			}
+			sent_ping = 1;
 		}
 
 		if (!sent_ping && !qn->is_server && !qn->handshake_done) {
@@ -1434,7 +1450,11 @@ send_frames:
 		}
 
 		/* AEAD Confidentiality Limits Check (RFC 9001 Section 6.6) */
-		if (level == LWS_QUIC_LEVEL_APP && qn->tx_packets_since_update > (1ULL << 20)) {
+		uint64_t update_limit = (1ULL << 20);
+		if (wsi->a.vhost && (wsi->a.vhost->options & LWS_SERVER_OPTION_QUIC_EARLY_KEY_UPDATE)) {
+			update_limit = 1000; /* Trigger early for interop testing */
+		}
+		if (level == LWS_QUIC_LEVEL_APP && qn->tx_packets_since_update > update_limit) {
 			lws_quic_initiate_key_update(wsi);
 		}
 
@@ -1577,16 +1597,16 @@ send_frames:
 				if (type & 0x01) /* LEN */
 					p += lws_quic_write_varint(p, sizeof(pkt) - (size_t)(p - pkt), send_len);
 			} else if (type == LWS_QUIC_FT_MAX_DATA || type == LWS_QUIC_FT_DATA_BLOCKED) {
-				p += lws_quic_write_varint(p, sizeof(pkt) - (size_t)(p - pkt), f->limit); lwsl_err("QUIC TX: Serialized MAX_STREAMS! limit %llu\n", (unsigned long long)f->limit);
+				p += lws_quic_write_varint(p, sizeof(pkt) - (size_t)(p - pkt), f->limit);
 			} else if (type == LWS_QUIC_FT_MAX_STREAM_DATA || type == LWS_QUIC_FT_STREAM_DATA_BLOCKED) {
 				//lwsl_notice( "QUIC TX: Formatting MAX_STREAM_DATA for stream %llu", (unsigned long long)f->stream_id);
                                 p += lws_quic_write_varint(p, sizeof(pkt) - (size_t)(p - pkt), f->stream_id);
-				p += lws_quic_write_varint(p, sizeof(pkt) - (size_t)(p - pkt), f->limit); lwsl_err("QUIC TX: Serialized MAX_STREAMS! limit %llu\n", (unsigned long long)f->limit);
+				p += lws_quic_write_varint(p, sizeof(pkt) - (size_t)(p - pkt), f->limit);
 			} else if (type == LWS_QUIC_FT_RESET_STREAM) {
 				//lwsl_notice( "QUIC TX: Formatting MAX_STREAM_DATA for stream %llu", (unsigned long long)f->stream_id);
                                 p += lws_quic_write_varint(p, sizeof(pkt) - (size_t)(p - pkt), f->stream_id);
 				p += lws_quic_write_varint(p, sizeof(pkt) - (size_t)(p - pkt), f->offset); /* app_err_code */
-				p += lws_quic_write_varint(p, sizeof(pkt) - (size_t)(p - pkt), f->limit); lwsl_err("QUIC TX: Serialized MAX_STREAMS! limit %llu\n", (unsigned long long)f->limit); /* final_size */
+				p += lws_quic_write_varint(p, sizeof(pkt) - (size_t)(p - pkt), f->limit); /* final_size */
 			} else if (type == LWS_QUIC_FT_STOP_SENDING) {
 				//lwsl_notice( "QUIC TX: Formatting MAX_STREAM_DATA for stream %llu", (unsigned long long)f->stream_id);
                                 p += lws_quic_write_varint(p, sizeof(pkt) - (size_t)(p - pkt), f->stream_id);
@@ -1796,8 +1816,12 @@ send_frames:
 			} lws_end_foreach_dll(d);
 		}
 
-		if (ack_eliciting && qn->cc_ops && qn->cc_ops->on_sent)
-			qn->cc_ops->on_sent(wsi, send_len);
+		if (ack_eliciting) {
+			if (qn->pto_probe_needed > 0)
+				qn->pto_probe_needed--;
+			if (qn->cc_ops && qn->cc_ops->on_sent)
+				qn->cc_ops->on_sent(wsi, send_len);
+		}
 
 		// lwsl_wsi_info(wsi, "QUIC TX: Sent %d bytes, bundled frames into PN %llu",
 		//		n, (unsigned long long)my_pn);
@@ -1824,8 +1848,6 @@ send_frames:
 			}
 		}
 	}
-
-	qn->pto_probe_needed = 0;
 
 	/* If we handled all pending crypto/internal frames, give the user a chance to write */
 	struct lws *nwsi = lws_get_quic_network_wsi(wsi);
@@ -1945,13 +1967,16 @@ end_children:
 		}
 
 		// lwsl_wsi_notice(wsi, "QUIC TX: blocked=%d, have_pending_tx=%d, can_process_children=%d", blocked, have_pending_tx, can_process_children);
-		if (blocked || (!have_pending_tx && !can_process_children)) {
+		if (blocked || !have_pending_tx) {
 			// lwsl_wsi_notice(wsi, "QUIC TX: dropping POLLOUT manually (LWS_POLLOUT, 0)");
-			/* We are blocked by QUIC limits, or have nothing to send and children can't write.
-			 * Stop asking the OS for POLLOUT. We will re-enable it when POLLIN brings ACKs. */
+			/* We are blocked by QUIC limits, or have nothing to send right now.
+			 * Stop asking the OS for POLLOUT. We will re-enable it if children
+			 * need to write. */
 			if (lws_change_pollfd(wsi, LWS_POLLOUT, 0))
 				return LWS_HP_RET_BAIL_DIE;
-		} else {
+		}
+        
+        if (!blocked && can_process_children) {
 			// lwsl_wsi_notice(wsi, "QUIC TX: calling lws_wsi_mux_action_pending_writeable_reqs (wsi->mux.requested_POLLOUT=%d)", wsi->mux.requested_POLLOUT);
 			if (lws_wsi_mux_action_pending_writeable_reqs(wsi))
 				return LWS_HP_RET_BAIL_DIE;
@@ -2125,7 +2150,7 @@ rops_client_bind_quic(struct lws *wsi, const struct lws_client_connect_info *i)
 		wsi->quic.qn->nwsi = wsi;
 		wsi->quic.qn->is_server = 0;
 		wsi->quic.qn->version = LWS_QUIC_VERSION_1;
-		wsi->quic.qn->original_version = LWS_QUIC_VERSION_1;
+		wsi->quic.qn->original_version = wsi->quic.qn->version;
 		wsi->quic.qn->max_streams_bidi_local = 1024;
 		wsi->quic.qn->max_streams_unidi_local = 1024;
 
@@ -2339,7 +2364,10 @@ rops_callback_on_writable_quic(struct lws *wsi)
 void
 lws_quic_stream_cleanup(struct lws *wsi)
 {
-	struct lws *nwsi = lws_get_network_wsi(wsi);
+	struct lws *nwsi = wsi;
+	while (nwsi && !nwsi->quic.qn) {
+		nwsi = nwsi->mux.parent_wsi;
+	}
 	struct lws_quic_netconn *qn = nwsi ? nwsi->quic.qn : NULL;
 	int i;
 
@@ -2398,14 +2426,17 @@ lws_quic_stream_cleanup(struct lws *wsi)
 		if (is_remote_initiated) {
 			struct lws_quic_tx_frame *f_max = lws_zalloc(sizeof(*f_max), "quic max strm");
 			if (f_max) {
+				f_max->stream_id = -1ULL;
 				if (!is_unidirectional) {
 					qn->max_streams_bidi_local++;
 					f_max->type = LWS_QUIC_FT_MAX_STREAMS_BIDI;
 					f_max->limit = qn->max_streams_bidi_local;
+					lwsl_notice("QUIC TX: Queued MAX_STREAMS_BIDI with limit %llu\n", (unsigned long long)f_max->limit);
 				} else {
 					qn->max_streams_unidi_local++;
 					f_max->type = LWS_QUIC_FT_MAX_STREAMS_UNIDI;
 					f_max->limit = qn->max_streams_unidi_local;
+					lwsl_notice("QUIC TX: Queued MAX_STREAMS_UNIDI with limit %llu\n", (unsigned long long)f_max->limit);
 				}
 				lws_dll2_add_tail(&f_max->list, &qn->pending_tx[LWS_QUIC_LEVEL_APP]);
 				if (nwsi) lws_callback_on_writable(nwsi);
@@ -2458,7 +2489,7 @@ rops_close_kill_connection_quic(struct lws *wsi, enum lws_close_status reason)
 	if (wsi->mux.parent_wsi) {
 		struct lws *nwsi = wsi->mux.parent_wsi;
 		lws_wsi_mux_sibling_disconnect(wsi);
-		if (nwsi->mux.child_count == 0)
+		if (nwsi->mux.child_count == 0 && nwsi->quic.qn)
 			lws_set_timeout(nwsi, PENDING_TIMEOUT_HTTP_KEEPALIVE_IDLE,
 					nwsi->a.vhost->keepalive_timeout ?
 					nwsi->a.vhost->keepalive_timeout : 5);
@@ -2524,6 +2555,13 @@ rops_close_kill_connection_quic(struct lws *wsi, enum lws_close_status reason)
 
 		if (qn->cc_state)
 			lws_free_set_NULL(qn->cc_state);
+
+		for (int _i = 0; _i < 4; _i++) {
+			if (qn->crypto_rx_buf[_i]) {
+				lws_free(qn->crypto_rx_buf[_i]);
+				qn->crypto_rx_buf[_i] = NULL;
+			}
+		}
 
 		lws_free_set_NULL(wsi->quic.qn);
 	}
@@ -2619,10 +2657,12 @@ rops_tx_credit_quic(struct lws *wsi, char peer_to_us, int add)
 
 		/* We're being told we can write an additional "add" bytes to the peer */
 		wsi->txc.tx_cr += add;
-		wsi->quic.tx_blocked_sent = 0;
+		if (add > 0)
+			wsi->quic.tx_blocked_sent = 0;
 		if (nwsi != wsi) {
 			nwsi->txc.tx_cr += add;
-			nwsi->quic.tx_blocked_sent = 0;
+			if (add > 0)
+				nwsi->quic.tx_blocked_sent = 0;
 		}
 
 		/* Unblock if blocked */
@@ -2875,6 +2915,8 @@ rops_alpn_negotiated_quic(struct lws *wsi, const char *alpn)
                 lws_wsi_mux_sibling_disconnect(wsi);
 
         lws_wsi_mux_insert(wsi, nwsi, 0); /* client first request is stream ID 0 */
+        if (nwsi->quic.qn->next_stream_id_bidi_local == 0)
+                nwsi->quic.qn->next_stream_id_bidi_local = 4;
         lws_set_timeout(nwsi, NO_PENDING_TIMEOUT, 0);
 
 	if (listener) {

@@ -651,44 +651,94 @@ lws_tls_quic_rx_crypto(struct lws *wsi, int level, const uint8_t *buf, size_t le
 		return -1;
 
 	if (len > 0 && wsi->quic.qn) {
+		if (wsi->quic.qn->crypto_rx_buf_len[level] > 0) {
+			uint8_t *new_buf = lws_realloc(wsi->quic.qn->crypto_rx_buf[level],
+						       wsi->quic.qn->crypto_rx_buf_len[level] + len,
+						       "crypto rx buf");
+			if (!new_buf) {
+				lws_free(out);
+				return -1;
+			}
+			memcpy(new_buf + wsi->quic.qn->crypto_rx_buf_len[level], buf, len);
+			wsi->quic.qn->crypto_rx_buf[level] = new_buf;
+			wsi->quic.qn->crypto_rx_buf_len[level] += len;
+			
+			buf = wsi->quic.qn->crypto_rx_buf[level];
+			len = wsi->quic.qn->crypto_rx_buf_len[level];
+		}
+
 		lwsl_wsi_notice(wsi, "lws_tls_quic_rx_crypto: level %d, len %zu, buf[0]=%d", level, len, buf[0]);
 		lwsl_hexdump_notice(buf, len > 32 ? 32 : len);
-		size_t i = 0;
-		while (i < len) {
-			if (wsi->quic.qn->crypto_rx_expected_msg_len[level] > 0) {
-				size_t consume = wsi->quic.qn->crypto_rx_expected_msg_len[level];
-				if (consume > len - i)
-					consume = len - i;
-				wsi->quic.qn->crypto_rx_expected_msg_len[level] -= consume;
-				i += consume;
-				continue;
+		
+		size_t scan = 0;
+		size_t complete_len = 0;
+		while (scan < len) {
+			if (len - scan < 4) {
+				break;
 			}
-			
-			/* We are at the start of a new Handshake message! */
-			uint8_t type = buf[i];
-			lwsl_wsi_notice(wsi, "QUIC RX CRYPTO: checking message type %d at offset %zu", type, i);
+
+			uint8_t type = buf[scan];
+			lwsl_wsi_notice(wsi, "QUIC RX CRYPTO: checking message type %d at offset %zu", type, scan);
 			if (type == 24 || type == 5) {
 				lwsl_wsi_notice(wsi, "QUIC RX CRYPTO: Illegal TLS Handshake type %d", type);
 				lws_quic_enter_closing_state(wsi, 0x0100 + 10 /* unexpected_message */, 0, 0);
 				lws_free(out);
 				return -1;
 			}
-			
-			if (i + 3 >= len) {
-				/* Fragmented header - extremely rare in h3spec, but we'd need to handle it.
-				 * For now, assume headers are not fragmented across chunks. */
+
+			uint32_t msg_len = ((uint32_t)buf[scan+1] << 16) | ((uint32_t)buf[scan+2] << 8) | buf[scan+3];
+			if (scan + 4 + msg_len > len) {
 				break;
 			}
 			
-			uint32_t msg_len = ((uint32_t)buf[i+1] << 16) | ((uint32_t)buf[i+2] << 8) | buf[i+3];
-			wsi->quic.qn->crypto_rx_expected_msg_len[level] = msg_len;
-			lwsl_wsi_notice(wsi, "QUIC RX CRYPTO: Expecting %u bytes for message type %d", msg_len, type);
-			i += 4;
+			scan += 4 + msg_len;
+			complete_len = scan;
 		}
+
+		if (complete_len == 0) {
+			if (wsi->quic.qn->crypto_rx_buf_len[level] == 0) {
+				uint8_t *new_buf = lws_malloc(len, "crypto rx buf");
+				if (!new_buf) {
+					lws_free(out);
+					return -1;
+				}
+				memcpy(new_buf, buf, len);
+				wsi->quic.qn->crypto_rx_buf[level] = new_buf;
+				wsi->quic.qn->crypto_rx_buf_len[level] = len;
+			}
+			lws_free(out);
+			return 0;
+		}
+
+		n = lws_tls_quic_advance_handshake(wsi, level, buf, complete_len, out, &out_len);
+		if (n < 0) {
+			goto error_handling;
+		}
+
+		size_t remainder = len - complete_len;
+		if (remainder > 0) {
+			if (wsi->quic.qn->crypto_rx_buf_len[level] == 0) {
+				uint8_t *new_buf = lws_malloc(remainder, "crypto rx buf");
+				if (new_buf) {
+					memcpy(new_buf, buf + complete_len, remainder);
+					wsi->quic.qn->crypto_rx_buf[level] = new_buf;
+				}
+			} else {
+				memmove(wsi->quic.qn->crypto_rx_buf[level], buf + complete_len, remainder);
+			}
+			wsi->quic.qn->crypto_rx_buf_len[level] = remainder;
+		} else {
+			if (wsi->quic.qn->crypto_rx_buf_len[level] > 0) {
+				lws_free(wsi->quic.qn->crypto_rx_buf[level]);
+				wsi->quic.qn->crypto_rx_buf[level] = NULL;
+				wsi->quic.qn->crypto_rx_buf_len[level] = 0;
+			}
+		}
+	} else {
+		n = lws_tls_quic_advance_handshake(wsi, level, buf, len, out, &out_len);
 	}
 
-	n = lws_tls_quic_advance_handshake(wsi, level, buf, len, out, &out_len);
-
+error_handling:
 	if (n < 0) {
 #if defined(LWS_WITH_GNUTLS)
 		int alert_level = 0;

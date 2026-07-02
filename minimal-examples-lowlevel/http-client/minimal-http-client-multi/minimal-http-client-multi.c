@@ -797,6 +797,9 @@ int main(int argc, const char **argv)
 
 	if (lws_cmdline_option(argc, argv, "--quicv2"))
 		info.options |= LWS_SERVER_OPTION_QUIC_LATEST_VERSION;
+	
+	if (lws_cmdline_option(argc, argv, "--quic-early-key-update"))
+		info.options |= LWS_SERVER_OPTION_QUIC_EARLY_KEY_UPDATE;
 
 
 
@@ -877,6 +880,9 @@ int main(int argc, const char **argv)
 
 	if (lws_cmdline_option(argc, argv, switches[LWS_SW_NO_TLS].sw))
 		i.ssl_connection &= ~(LCCSCF_USE_SSL);
+
+	if (lws_cmdline_option(argc, argv, "--0rtt"))
+		i.ssl_connection |= LCCSCF_ALLOW_EARLY_DATA;
 
 	int c_opt = count;
 	if ((p = lws_cmdline_option(argc, argv, switches[LWS_SW_C].sw))) {

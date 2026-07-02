@@ -287,9 +287,11 @@ struct lws_quic_netconn {
 	uint32_t		version;
 	uint32_t		original_version;
 
-	uint64_t		conn_close_err;
-	size_t			crypto_rx_expected_msg_len[4];
-	uint8_t			highest_rx_level;
+	uint64_t                conn_close_err;
+	size_t                  crypto_rx_expected_msg_len[4];
+	uint8_t                 *crypto_rx_buf[4];
+	size_t                  crypto_rx_buf_len[4];
+	uint8_t                 highest_rx_level;
 	uint8_t			pto_count;
 
 	/* Key Update Tracking */
@@ -316,7 +318,7 @@ struct lws_quic_netconn {
 	uint8_t			handshake_done:1;
 	uint8_t			tp_parsed:1;
 	uint8_t			alpn_migrated:1;
-	uint8_t			pto_probe_needed:1;
+	uint8_t			pto_probe_needed:2;
 	uint8_t			address_validated:1;
 	uint8_t			is_closing:1;
 

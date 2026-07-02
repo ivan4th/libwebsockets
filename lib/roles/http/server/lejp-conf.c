@@ -53,6 +53,7 @@ static const char * const paths_global[] = {
 	"global.quic-pad-crypto",
 	"global.allow-early-data",
 	"global.quic-only-latest",
+	"global.quic-early-key-update",
 };
 
 enum lejp_global_paths {
@@ -77,6 +78,7 @@ enum lejp_global_paths {
 	LEJPGP_QUIC_PAD_CRYPTO,
 	LEJPGP_ALLOW_EARLY_DATA,
 	LEJPGP_QUIC_ONLY_LATEST,
+	LEJPGP_QUIC_EARLY_KEY_UPDATE,
 };
 
 static const char * const paths_vhosts[] = {
@@ -416,6 +418,10 @@ lejp_globals_cb(struct lejp_ctx *ctx, char reason)
 	case LEJPGP_QUIC_ONLY_LATEST:
 		if (arg_to_bool(ctx->buf))
 			a->info->options |= LWS_SERVER_OPTION_QUIC_LATEST_VERSION;
+		return 0;
+	case LEJPGP_QUIC_EARLY_KEY_UPDATE:
+		if (arg_to_bool(ctx->buf))
+			a->info->options |= LWS_SERVER_OPTION_QUIC_EARLY_KEY_UPDATE;
 		return 0;
 	case LEJPGP_SERVER_STRING:
 #if defined(LWS_WITH_SERVER)

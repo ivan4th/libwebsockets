@@ -348,8 +348,11 @@ lws_quic_rx_reassemble(struct lws *nwsi, struct lws *wsi_child, struct lws_quic_
 					}
 
 					if (!is_crypto && !wsi_child) {
-						lws_dll2_remove(&c->list);
-						lws_free(c);
+                                                /*
+                                                 * The WSI was closed and freed. Its cleanup routine
+                                                 * already freed all buffered chunks, including c.
+                                                 * We must not touch c, qs or the list anymore.
+                                                 */
 						return;
 					}
 
@@ -758,15 +761,19 @@ lws_quic_parse_frames(struct lws *nwsi, int level, uint8_t *payload, size_t payl
 			lwsl_wsi_notice(nwsi, "QUIC RX: Parsed MAX/BLOCKED STREAMS! max_streams %llu", (unsigned long long)max_streams);
 			if (qn) {
 				if (type == LWS_QUIC_FT_MAX_STREAMS_BIDI) {
-					qn->max_streams_bidi_remote = max_streams;
+					if (max_streams > qn->max_streams_bidi_remote) {
+						qn->max_streams_bidi_remote = max_streams;
 #if defined(LWS_WITH_CLIENT)
-					lws_wsi_mux_apply_queue(nwsi);
+						lws_wsi_mux_apply_queue(nwsi);
 #endif
+					}
 				} else if (type == LWS_QUIC_FT_MAX_STREAMS_UNIDI) {
-					qn->max_streams_unidi_remote = max_streams;
+					if (max_streams > qn->max_streams_unidi_remote) {
+						qn->max_streams_unidi_remote = max_streams;
 #if defined(LWS_WITH_CLIENT)
-					lws_wsi_mux_apply_queue(nwsi);
+						lws_wsi_mux_apply_queue(nwsi);
 #endif
+					}
 				}
 			}
 			break;
