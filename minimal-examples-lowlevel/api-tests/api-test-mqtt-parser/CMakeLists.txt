@@ -23,12 +23,8 @@ if (requirements)
 		${CMAKE_SOURCE_DIR}/lib/roles/mqtt
 	)
 
-	if (websockets_shared)
-		target_link_libraries(${SAMP} websockets_shared ${LIBWEBSOCKETS_DEP_LIBS})
-		add_dependencies(${SAMP} websockets_shared)
-	else()
-		target_link_libraries(${SAMP} websockets ${LIBWEBSOCKETS_DEP_LIBS})
-	endif()
+	# always link the static lib: these tests use internal symbols
+	target_link_libraries(${SAMP} websockets ${LIBWEBSOCKETS_DEP_LIBS})
 
 	# Infinite loop bug test - tests for unhandled packet types
 	set(LOOP_TEST lws-api-test-mqtt-infinite-loops)
@@ -66,12 +62,8 @@ if (requirements)
 	)
 	target_compile_definitions(${LOOP_TEST} PRIVATE LWS_BUILDING_STATIC)
 
-	if (websockets_shared)
-		target_link_libraries(${LOOP_TEST} websockets_shared ${LIBWEBSOCKETS_DEP_LIBS})
-		add_dependencies(${LOOP_TEST} websockets_shared)
-	else()
-		target_link_libraries(${LOOP_TEST} websockets ${LIBWEBSOCKETS_DEP_LIBS})
-	endif()
+	# always link the static lib: these tests use internal symbols
+	target_link_libraries(${LOOP_TEST} websockets ${LIBWEBSOCKETS_DEP_LIBS})
 
 	# CONNACK test needs same include directories for internal headers
 	target_include_directories(${CONNACK_TEST} PRIVATE
@@ -97,12 +89,8 @@ if (requirements)
 	)
 	target_compile_definitions(${CONNACK_TEST} PRIVATE LWS_BUILDING_STATIC)
 
-	if (websockets_shared)
-		target_link_libraries(${CONNACK_TEST} websockets_shared ${LIBWEBSOCKETS_DEP_LIBS})
-		add_dependencies(${CONNACK_TEST} websockets_shared)
-	else()
-		target_link_libraries(${CONNACK_TEST} websockets ${LIBWEBSOCKETS_DEP_LIBS})
-	endif()
+	# always link the static lib: these tests use internal symbols
+	target_link_libraries(${CONNACK_TEST} websockets ${LIBWEBSOCKETS_DEP_LIBS})
 
 	# Control packets test - tests for PINGREQ, DISCONNECT, AUTH parsing
 	set(CONTROL_TEST lws-api-test-mqtt-control-packets)
@@ -133,11 +121,7 @@ if (requirements)
 	)
 	target_compile_definitions(${CONTROL_TEST} PRIVATE LWS_BUILDING_STATIC)
 
-	if (websockets_shared)
-		target_link_libraries(${CONTROL_TEST} websockets_shared ${LIBWEBSOCKETS_DEP_LIBS})
-		add_dependencies(${CONTROL_TEST} websockets_shared)
-	else()
-		target_link_libraries(${CONTROL_TEST} websockets ${LIBWEBSOCKETS_DEP_LIBS})
-	endif()
+	# always link the static lib: these tests use internal symbols
+	target_link_libraries(${CONTROL_TEST} websockets ${LIBWEBSOCKETS_DEP_LIBS})
 
 endif()
