@@ -1064,9 +1064,10 @@ _lws_mqtt_rx_parser(struct lws *wsi, lws_mqtt_parser_t *par,
 			/* Topic complete - null terminate */
 			pub->topic[pub->topic_len] = '\0';
 
-			/* Extract QoS Level from Fixed Header Flags */
+			/* Extract QoS Level and RETAIN from Fixed Header Flags */
 			pub->qos = (lws_mqtt_qos_levels_t)
 					((par->packet_type_flags >> 1) & 0x3);
+			pub->retain = !!(par->packet_type_flags & 1);
 
 			pub->payload_pos = 0;
 
