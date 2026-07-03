@@ -226,7 +226,7 @@ test_vbi_fragmented_single_byte(void)
 		struct vbi_test *t = &vbi_tests[i];
 		lws_mqtt_vbi vbi;
 		const uint8_t *p;
-		size_t remaining, len;
+		size_t len;
 		lws_mqtt_stateful_primitive_return_t r = LMSPR_NEED_MORE;
 		size_t byte_idx;
 
@@ -235,13 +235,11 @@ test_vbi_fragmented_single_byte(void)
 
 		lws_mqtt_vbi_init(&vbi);
 		p = t->data;
-		remaining = t->len;
 
 		/* Feed one byte at a time */
 		for (byte_idx = 0; byte_idx < t->len && r == LMSPR_NEED_MORE; byte_idx++) {
 			len = 1;
 			r = lws_mqtt_vbi_r(&vbi, &p, &len);
-			remaining--;
 		}
 
 		if (r != t->expected_result) {
