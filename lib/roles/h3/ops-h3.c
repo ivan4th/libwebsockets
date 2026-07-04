@@ -272,15 +272,8 @@ rops_perform_user_POLLOUT_h3(struct lws *wsi)
 				return -1;
 		}
 		if (!n) {
-			int32_t usable_credit2 = wsi->txc.tx_cr;
-			if (lws_rops_fidx(wsi->role_ops, LWS_ROPS_tx_credit)) {
-				usable_credit2 = lws_rops_func_fidx(wsi->role_ops, LWS_ROPS_tx_credit).
-							tx_credit(wsi, LWSTXCR_US_TO_PEER, 0);
-			}
-			if (usable_credit2 > 0) {
-				lws_callback_on_writable(wsi);
-				wsi->mux.requested_POLLOUT = 1;
-			}
+			lws_callback_on_writable(wsi);
+			wsi->mux.requested_POLLOUT = 1;
 		}
 
 		return 0;

@@ -1108,7 +1108,11 @@ struct lws_context_creation_info {
 	const struct lws_cc_ops		*quic_cc_ops;
 	/**< CONTEXT: QUIC congestion control algorithm ops to use. If NULL, defaults to &lws_cc_ops_newreno. */
 
-	void *_unused[1]; /**< dummy */
+	const char                      *quic_preferred_addresses;
+	/**< VHOST: Comma-separated list of IPv4 and/or IPv6 preferred addresses (e.g., "1.2.3.4:443,[2001:db8::1]:443")
+	 * to send to the client during the handshake to facilitate Connection Migration. */
+
+	void *_unused[0]; /**< dummy */
 };
 
 /**

@@ -1511,7 +1511,7 @@ int lws_wsi_mux_mark_parents_needing_writeable(struct lws *wsi) {
 	wsi2 = wsi;
 	while (wsi2) {
 		wsi2->mux.requested_POLLOUT = 1;
-		lwsl_wsi_info(wsi2, "sid %u, pending writable", wsi2->mux.my_sid);
+		lwsl_wsi_debug(wsi2, "sid %u, pending writable", wsi2->mux.my_sid);
 		wsi2 = wsi2->mux.parent_wsi;
 	}
 

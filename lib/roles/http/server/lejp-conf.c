@@ -174,6 +174,7 @@ static const char * const paths_vhosts[] = {
 	"vhosts[].dht[]",
 #endif
 	"vhosts[].quic-mtu",
+	"vhosts[].quic-preferred-addresses",
 };
 
 enum lejp_vhost_paths {
@@ -271,6 +272,7 @@ enum lejp_vhost_paths {
 	LEJPVP_DHT,
 #endif
 	LEJPVP_QUIC_MTU,
+	LEJPVP_QUIC_PREFERRED_ADDRESSES,
 };
 
 #define MAX_PLUGIN_DIRS 10
@@ -516,6 +518,7 @@ lejp_vhosts_cb(struct lejp_ctx *ctx, char reason)
 			LWS_SERVER_OPTION_UV_NO_SIGSEGV_SIGFPE_SPIN |
 			LWS_SERVER_OPTION_LIBEVENT |
 			LWS_SERVER_OPTION_QUIC_PAD_CRYPTO |
+			LWS_SERVER_OPTION_QUIC_EARLY_KEY_UPDATE |
 			LWS_SERVER_OPTION_LIBEV
 				);
 #if defined(LWS_WITH_SERVER)
@@ -1192,6 +1195,9 @@ lejp_vhosts_cb(struct lejp_ctx *ctx, char reason)
 	case LEJPVP_QUIC_MTU:
 		a->info->quic_mtu = (uint32_t)atoi(ctx->buf);
 		return 0;
+	case LEJPVP_QUIC_PREFERRED_ADDRESSES:
+		a->info->quic_preferred_addresses = a->p;
+		break;
 #endif
 
 	case LEJPVP_LISTEN_ACCEPT_ROLE:

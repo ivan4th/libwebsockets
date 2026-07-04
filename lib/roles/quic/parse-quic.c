@@ -576,6 +576,7 @@ lws_quic_parse_frames(struct lws *nwsi, int level, uint8_t *payload, size_t payl
 					pos += consumed;
 				}
 			}
+			lws_quic_detect_loss(nwsi, level, largest_ack);
 			break;
 		}
 
@@ -839,6 +840,19 @@ lws_quic_parse_frames(struct lws *nwsi, int level, uint8_t *payload, size_t payl
 					lwsl_wsi_notice(nwsi, "QUIC RX: Path validated via PATH_RESPONSE!");
 					nwsi->quic.qn->address_validated = 1;
 					nwsi->quic.qn->path_challenge_pending = 0;
+					
+					if (nwsi->quic.qn->migration_probing_wsi == nwsi) {
+						struct lws *old_nwsi = nwsi->quic.qn->nwsi;
+						/* Reparent the connection! */
+						nwsi->quic.qn->nwsi = nwsi;
+						nwsi->quic.qn->migration_probing_wsi = NULL;
+						
+						if (old_nwsi && old_nwsi != nwsi) {
+							lwsl_wsi_notice(nwsi, "QUIC: Active Migration Make-Before-Break Complete! Closing old nwsi.");
+							old_nwsi->quic.qn = NULL; /* Detach so close doesn't free it */
+							lws_close_free_wsi(old_nwsi, LWS_CLOSE_STATUS_NOSTATUS, "migrated");
+						}
+					}
 				} else {
 					lwsl_wsi_notice(nwsi, "QUIC RX: Spurious or mismatched PATH_RESPONSE, ignoring");
 				}
@@ -1376,15 +1390,58 @@ lws_quic_parse_transport_parameters(struct lws *wsi, const uint8_t *buf, size_t 
 			}
 			break;
 		case 0x02: /* stateless_reset_token */
+			if (qn->is_server) {
+				/* Client cannot send these */
+				lwsl_wsi_err(wsi, "QUIC TP error: Client sent server-only parameter %llu", (unsigned long long)param_id);
+				return -1;
+			}
+			if (param_len != 16) {
+				lwsl_wsi_err(wsi, "QUIC TP error: stateless_reset_token length %llu != 16", (unsigned long long)param_len);
+				return -1;
+			}
+			break;
 		case 0x0d: /* preferred_address */
 			if (qn->is_server) {
 				/* Client cannot send these */
 				lwsl_wsi_err(wsi, "QUIC TP error: Client sent server-only parameter %llu", (unsigned long long)param_id);
 				return -1;
 			}
-			if (param_id == 0x02 && param_len != 16) {
-				lwsl_wsi_err(wsi, "QUIC TP error: stateless_reset_token length %llu != 16", (unsigned long long)param_len);
-				return -1;
+			if (param_len >= 4+2+16+2+1+16) {
+				/* Pick IPv4 if present, else IPv6 */
+				char addr_str[64];
+				int port = 0;
+				struct lws_client_connect_info i;
+
+				/* Try IPv4 first (RFC says it's 4 bytes IP + 2 bytes port) */
+				uint32_t ip4;
+				memcpy(&ip4, &buf[pos], 4);
+				if (ip4 != 0) {
+					lws_snprintf(addr_str, sizeof(addr_str), "%u.%u.%u.%u",
+						buf[pos], buf[pos+1], buf[pos+2], buf[pos+3]);
+					port = (buf[pos+4] << 8) | buf[pos+5];
+				} else {
+					/* Try IPv6 */
+					const uint8_t *v6 = &buf[pos+6];
+					lws_snprintf(addr_str, sizeof(addr_str), "[%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x]",
+						v6[0], v6[1], v6[2], v6[3], v6[4], v6[5], v6[6], v6[7],
+						v6[8], v6[9], v6[10], v6[11], v6[12], v6[13], v6[14], v6[15]);
+					port = (buf[pos+22] << 8) | buf[pos+23];
+				}
+
+				if (port > 0) {
+					lwsl_wsi_notice(wsi, "QUIC TP: Migrating to preferred_address %s:%d", addr_str, port);
+					memset(&i, 0, sizeof(i));
+					i.context = wsi->a.context;
+					i.vhost = wsi->a.vhost;
+					i.address = addr_str;
+					i.host = addr_str;
+					i.origin = addr_str;
+					i.port = port;
+					i.ssl_connection = LCCSCF_USE_SSL | LCCSCF_ALLOW_INSECURE;
+					i.quic_migrate_from_wsi = qn->nwsi;
+
+					lws_client_connect_via_info(&i);
+				}
 			}
 			break;
 		default:

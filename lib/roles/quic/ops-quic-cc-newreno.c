@@ -106,6 +106,20 @@ newreno_on_ack(struct lws *nwsi, size_t bytes_acked, lws_usec_t rtt)
 }
 
 static void
+newreno_on_discard(struct lws *nwsi, size_t bytes_discarded)
+{
+        struct lws_quic_netconn *qn = nwsi->quic.qn;
+        struct lws_quic_cc_newreno *st = (struct lws_quic_cc_newreno *)qn->cc_state;
+
+        if (!st) return;
+
+        if (st->bytes_in_flight >= bytes_discarded)
+                st->bytes_in_flight -= bytes_discarded;
+        else
+                st->bytes_in_flight = 0;
+}
+
+static void
 newreno_on_loss(struct lws *nwsi, size_t bytes_lost)
 {
 	struct lws_quic_netconn *qn = nwsi->quic.qn;
@@ -196,6 +210,7 @@ const struct lws_cc_ops lws_cc_ops_newreno = {
 	.on_sent		= newreno_on_sent,
 	.on_ack			= newreno_on_ack,
 	.on_loss		= newreno_on_loss,
+	.on_discard		= newreno_on_discard,
 	.can_send		= newreno_can_send,
 	.get_pacing_delay	= newreno_get_pacing_delay,
 };

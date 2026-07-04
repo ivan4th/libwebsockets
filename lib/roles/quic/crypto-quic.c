@@ -166,16 +166,23 @@ lws_quic_initiate_key_update(struct lws *wsi)
 	qn = nwsi->quic.qn;
 	
 	/* We only update keys if the handshake is done and we have APP keys */
-	if (!qn->handshake_done || !qn->keys[LWS_QUIC_LEVEL_APP])
+	if (!qn->handshake_done || !qn->keys[LWS_QUIC_LEVEL_APP]) {
+		lwsl_wsi_notice(wsi, "QUIC Key Update failed: handshake_done=%d, app_keys=%p",
+			qn->handshake_done, qn->keys[LWS_QUIC_LEVEL_APP]);
 		return -1;
+	}
 		
 	/* If an update is already pending, wait for it to be echoed/completed */
-	if (qn->key_update_pending)
+	if (qn->key_update_pending) {
+		lwsl_wsi_notice(wsi, "QUIC Key Update ignored: pending");
 		return -1;
+	}
 
 	/* Derive the new TX keys */
-	if (lws_quic_update_keys(qn->keys[LWS_QUIC_LEVEL_APP], 0))
+	if (lws_quic_update_keys(qn->keys[LWS_QUIC_LEVEL_APP], 0)) {
+		lwsl_wsi_err(wsi, "QUIC Key Update failed: lws_quic_update_keys error");
 		return -1;
+	}
 		
 	/* Flip the TX key phase bit */
 	qn->tx_key_phase ^= 1;
@@ -185,6 +192,8 @@ lws_quic_initiate_key_update(struct lws *wsi)
 	
 	/* Reset the packet counter for AEAD limits */
 	qn->tx_packets_since_update = 0;
+
+	lwsl_wsi_notice(wsi, "QUIC TX: Key Update Initiated! tx_key_phase is now %d", qn->tx_key_phase);
 
 	return 0;
 }
@@ -311,26 +320,38 @@ lws_quic_update_keys(struct lws_quic_keys *k, int is_rx)
 	size_t key_len = (k->cipher_type == 0) ? 16 : 32;
 
 	if (is_rx) {
-		enum lws_genhmac_types hash_type = (k->secret_len == 48) ? LWS_GENHMAC_TYPE_SHA384 : LWS_GENHMAC_TYPE_SHA256;
-		if (lws_genhkdf_expand_label(hash_type, k->secret_rx, k->secret_len, "quic ku", NULL, 0, new_secret, k->secret_len)) return -1;
-		memcpy(k->secret_rx, new_secret, k->secret_len);
-		
-		if (lws_genhkdf_expand_label(hash_type, new_secret, k->secret_len, "quic key", NULL, 0, k->key_aead_rx, key_len)) return -1;
-		if (lws_genhkdf_expand_label(hash_type, new_secret, k->secret_len, "quic iv", NULL, 0, k->iv_rx, 12)) return -1;
-		
-		k->el_aead_rx.buf = k->key_aead_rx;
-		k->el_aead_rx.len = (uint32_t)key_len;
-	} else {
-		enum lws_genhmac_types hash_type = (k->secret_len == 48) ? LWS_GENHMAC_TYPE_SHA384 : LWS_GENHMAC_TYPE_SHA256;
-		if (lws_genhkdf_expand_label(hash_type, k->secret_tx, k->secret_len, "quic ku", NULL, 0, new_secret, k->secret_len)) return -1;
-		memcpy(k->secret_tx, new_secret, k->secret_len);
-		
-		if (lws_genhkdf_expand_label(hash_type, new_secret, k->secret_len, "quic key", NULL, 0, k->key_aead_tx, key_len)) return -1;
-		if (lws_genhkdf_expand_label(hash_type, new_secret, k->secret_len, "quic iv", NULL, 0, k->iv_tx, 12)) return -1;
-		
-		k->el_aead_tx.buf = k->key_aead_tx;
-		k->el_aead_tx.len = (uint32_t)key_len;
-	}
+                enum lws_genhmac_types hash_type = (k->secret_len == 48) ? LWS_GENHMAC_TYPE_SHA384 : LWS_GENHMAC_TYPE_SHA256;
+                if (lws_genhkdf_expand_label(hash_type, k->secret_rx, k->secret_len, "quic ku", NULL, 0, new_secret, k->secret_len)) return -1;
+                memcpy(k->secret_rx, new_secret, k->secret_len);
+
+                if (lws_genhkdf_expand_label(hash_type, new_secret, k->secret_len, "quic key", NULL, 0, k->key_aead_rx, key_len)) return -1;
+                if (lws_genhkdf_expand_label(hash_type, new_secret, k->secret_len, "quic iv", NULL, 0, k->iv_rx, 12)) return -1;
+
+                k->el_aead_rx.buf = k->key_aead_rx;
+                k->el_aead_rx.len = (uint32_t)key_len;
+#if defined(LWS_WITH_GNUTLS)
+                if (k->aead_rx) {
+                        gnutls_aead_cipher_deinit((gnutls_aead_cipher_hd_t)k->aead_rx);
+                        k->aead_rx = NULL;
+                }
+#endif
+        } else {
+                enum lws_genhmac_types hash_type = (k->secret_len == 48) ? LWS_GENHMAC_TYPE_SHA384 : LWS_GENHMAC_TYPE_SHA256;
+                if (lws_genhkdf_expand_label(hash_type, k->secret_tx, k->secret_len, "quic ku", NULL, 0, new_secret, k->secret_len)) return -1;
+                memcpy(k->secret_tx, new_secret, k->secret_len);
+
+                if (lws_genhkdf_expand_label(hash_type, new_secret, k->secret_len, "quic key", NULL, 0, k->key_aead_tx, key_len)) return -1;
+                if (lws_genhkdf_expand_label(hash_type, new_secret, k->secret_len, "quic iv", NULL, 0, k->iv_tx, 12)) return -1;
+
+                k->el_aead_tx.buf = k->key_aead_tx;
+                k->el_aead_tx.len = (uint32_t)key_len;
+#if defined(LWS_WITH_GNUTLS)
+                if (k->aead_tx) {
+                        gnutls_aead_cipher_deinit((gnutls_aead_cipher_hd_t)k->aead_tx);
+                        k->aead_tx = NULL;
+                }
+#endif
+        }
 
 	lws_explicit_bzero(new_secret, sizeof(new_secret));
 	return 0;

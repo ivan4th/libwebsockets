@@ -98,7 +98,7 @@ static const struct lws_switches switches[] = {
 #include <unistd.h>
 #endif
 
-#define COUNT 1024
+#define COUNT 4096
 
 struct cliuser {
 	int index;
@@ -130,7 +130,7 @@ struct req {
 	int port;
 	char path[128];
 };
-static struct req reqs[1024];
+static struct req reqs[COUNT];
 
 struct pss {
 	char body_part;
@@ -616,7 +616,7 @@ stagger_cb(lws_sorted_usec_list_t *sul)
 	if (stagger_idx == count)
 		return;
 
-	next = 150 * LWS_US_PER_MS;
+	if (count > 100) next = 1 * LWS_US_PER_MS; else next = 150 * LWS_US_PER_MS;
 	if (stagger_idx == count - 1)
 		next += 400 * LWS_US_PER_MS;
 
@@ -739,6 +739,12 @@ int main(int argc, const char **argv)
 #endif
         }
 
+        if (lws_cmdline_option(argc, argv, "--quicv2"))
+                info.options |= LWS_SERVER_OPTION_QUIC_LATEST_VERSION;
+
+        if (lws_cmdline_option(argc, argv, "--quic-early-key-update"))
+                info.options |= LWS_SERVER_OPTION_QUIC_EARLY_KEY_UPDATE;
+
         /* lws_context_info_defaults sets LWS_SERVER_OPTION_EXPLICIT_VHOSTS by default now,
          * which skips creating the default vhost using our info struct. Clear it so
          * our TLS cipher overrides are actually used to create the default vhost! */
@@ -841,7 +847,7 @@ int main(int argc, const char **argv)
 					lws_strncpy(reqs[count].address, url, sizeof(reqs[count].address));
 			}
 			count++;
-			if (count == 1024) break;
+			if (count == COUNT) break;
 		}
 	}
 	int default_urls = 0;
