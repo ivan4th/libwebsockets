@@ -578,6 +578,18 @@ rops_close_kill_connection_mqtt(struct lws *wsi, enum lws_close_status reason)
 	if (wsi->mux_substream
 #if defined(LWS_WITH_CLIENT)
 			|| wsi->client_mux_substream
+			/*
+			 * The MQTT network wsi that migrated its stream to a
+			 * mux child (client_mux_migrated) must cascade the
+			 * close to the children, like the h2 network wsi does
+			 * via upgraded_to_http2.  Otherwise a direct close of
+			 * the network wsi (validity timeout, peer FIN / RST)
+			 * orphans the established child substream: it gets no
+			 * CLIENT_CLOSED callback and is leaked, and the
+			 * user's handle to it dangles into the freed network
+			 * wsi via mux.parent_wsi.
+			 */
+			|| wsi->client_mux_migrated
 #endif
 	) {
 		lwsl_info("closing %s: parent %s: first child %p\n",
